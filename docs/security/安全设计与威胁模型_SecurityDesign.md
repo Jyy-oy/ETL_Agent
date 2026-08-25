@@ -52,7 +52,9 @@
 ## 5. Secret 与密钥管理
 
 - `.env` 只用于本地占位值，生产 Secret 不进入 Git、镜像或普通日志。
-- 连接凭据保存为 Vault `SecretRef`，Worker 仅在执行窗口内解析，并在内存中短暂使用。
+- 连接凭据保存为 Vault `SecretRef`，M2.2 的连接测试/Profile 仅在请求窗口内解析，并在内存中短暂使用；业务表和 API 响应不保存密码。
+- M2.2 Profile 只允许 information_schema 读取和限额样本查询，样本按字段名执行密码、Token、邮箱、手机号等脱敏后才落库。
+- M2.3 文件上传先执行大小和格式校验，MinIO 对象键使用服务端生成的项目隔离路径；PostgreSQL 只保存对象引用、哈希和脱敏 Profile，不保存原始文件内容。
 - Capability 私钥优先由 Vault Transit/KMS 托管；MVP PEM 文件只能用于本地开发。
 - JWT 密钥、MinIO 密钥、百炼 API Key 和数据库密码必须按环境独立轮换。
 - Secret 轮换不应修改 PipelineVersion；连接器在运行时通过引用取得当前凭据。

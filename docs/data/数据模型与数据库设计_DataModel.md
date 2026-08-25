@@ -34,6 +34,14 @@
 | `outbox_events` | 可靠投递命令 | event_id 幂等 |
 | `audit_events` | 哈希链审计证据 | `prev_hash`/`event_hash` |
 
+M2.1 已落地 `connections` 和 `metadata_profiles`：连接表只保存 host/port/database/username、非敏感 options 和 Vault `secret_ref`；Profile 表保存版本、指纹、Schema 快照、脱敏样本和近似行数。Profile 通过 `(connection_id, fingerprint)` 唯一约束保证同一快照可复用。
+
+M1.2 为 `users` 增加可轮换的 `password_hash` 字段，仅用于本地 development 登录；API 永不返回该字段，企业环境应通过 OIDC/SSO 替换本地注册。
+
+M2.3 的 `file_assets` 保存项目归属、上传用户、MinIO bucket/object key、原始文件名、内容类型、格式、大小、SHA-256 和脱敏 `schema_json`；原始文件不进入 PostgreSQL。上传限制由配置 `MAX_UPLOAD_SIZE_BYTES` 控制，数据库提交失败时执行对象删除补偿。
+
+M3.1 已落地 `pipelines`、`pipeline_versions`、`agent_runs` 和 `generation_attempts`（迁移 `0005_agent_generation`、`0006_agent_run_request`）。草稿版本允许生成写入；门禁通过后才写入规范化 EtlPlan、HOCON、`artifact_digest` 并设置 `immutable=true`。AgentRun 保存 thread/provider/model、Prompt 摘要、脱敏请求快照、节点轨迹、修复次数和错误码；每次候选或修复只保存输出摘要与校验错误，不保存完整 Prompt、API Key 或未脱敏样本。LangGraph Checkpoint 由 PostgreSQL 独立表承载，不能以进程内存替代。
+
 ## 3. 关系约束
 
 - 所有项目资源必须可通过 `project_id` 追溯，查询默认带租户/项目过滤。

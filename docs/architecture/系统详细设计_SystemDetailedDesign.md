@@ -94,6 +94,10 @@ PolicyDecisionPoint
 
 模型输出不能直接创建 Preparation、审批请求或 ExecutionRun。
 
+M3.1 实现对应 `src/etl_agent/workflows/graph.py`、`src/etl_agent/workflows/validation.py` 和 `src/etl_agent/infrastructure/llm.py`。当前图支持 `needs_clarification`、结构化校验失败、一次有限修复和 `completed` 四类结果；`src/etl_agent/workflows/checkpoint.py` 使用 `AsyncPostgresSaver` 初始化 PostgreSQL Checkpoint。成功候选通过 API 写入草稿 `PipelineVersion`，以 EtlPlan/HOCON 规范化内容计算 SHA-256 后设置不可变标志；失败候选只记录 `AgentRun`/`GenerationAttempt` 证据。
+
+澄清恢复由 `POST /api/v1/agent-runs/{run_id}/answers` 提供：服务端只合并答案文本，复用 AgentRun 的脱敏请求快照和 `thread_id`，不允许答案修改项目授权或预算上限。
+
 ## 4. Harness 执行协议
 
 ### Prepare

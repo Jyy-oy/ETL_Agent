@@ -1,5 +1,71 @@
 # ETL-Agent 学习资料与工程沉淀变更记录
 
+## 2026-08-25：M3.1 Agent 结构化生成切片完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 3 LangGraph 生成
+- 根因与解决过程：新增严格 EtlPlan/RuntimeBudget/Profile 引用模型、OpenAI-compatible 远端 Provider 与 fake Provider；实现 LangGraph 意图解析、缺参中断、结构化校验、PyHOCON 编译、Profile/预算确定性门禁和一次有限修复。新增 `pipelines`、`pipeline_versions`、`agent_runs`、`generation_attempts` 及迁移 `0005_agent_generation`、`0006_agent_run_request`；生成 API 只有在门禁通过后才计算 SHA-256 并冻结不可变版本；AgentRun 保存脱敏请求快照，答案 API 复用原 thread 从 Checkpoint 恢复。
+- 未完成：真实百炼调用、Prepare/Approve/Commit 和 SeaTunnel 执行留待 M3.2/M4。
+- 验证证据：阶段 3 单元测试 7 项通过；全量 pytest 27 项通过；Ruff、Mypy、Alembic check 通过。VM PostgreSQL 已升级到 `0006_agent_run_request`，并通过真实 Checkpoint setup 与 fake Provider 生成恢复验证。
+- 涉及文件：`src/etl_agent/domain/generation.py`、`src/etl_agent/infrastructure/llm.py`、`src/etl_agent/workflows/`、`src/etl_agent/api/generation.py`、`migrations/versions/0005_agent_generation.py`、`migrations/versions/0006_agent_run_request.py`、`tests/unit/test_m3_generation.py`
+
+## 2026-08-25：Windows 异步 Checkpoint 运行时修正
+
+- 级别：开发环境/修复
+- 类型：配置修正
+- 来源：首次使用 VM PostgreSQL 初始化 LangGraph Checkpoint
+- 根因与解决过程：Windows 默认 Proactor event loop 不被 psycopg 异步连接支持；在 `src/etl_agent/main.py` 入口设置 `WindowsSelectorEventLoopPolicy`，确保 PyCharm/Uvicorn 启动控制面时 `AsyncPostgresSaver` 可正常建立连接。
+- 验证证据：通过入口导入后在 VM PostgreSQL 完成 Checkpoint setup，并用 fake Provider 完成带 `thread_id` 的 LangGraph 生成。
+
+## 2026-08-25：M2.3 MinIO 文件资产与文件 Profile 完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：完成 M2 连接与 Profile 剩余工作
+- 根因与解决过程：新增 `file_assets` 表和 MinIO S3 对象存储适配器；上传前流式计算大小/SHA-256，限制 CSV、JSON、XLSX、Parquet 格式，生成字段类型和有限脱敏样本后上传原文件；数据库仅保存对象引用、摘要和 Profile，提交失败执行对象删除补偿。
+- 未完成：真实 MinIO 上传和业务文件集成验收需配置 VM bucket 与认证；Worker 异步大文件处理留待 M5。
+- 验证证据：CSV/JSON Profile、敏感字段脱敏、大小/格式拒绝和 API 路由测试通过；Alembic 已升级至 `0004_file_assets`。
+- 涉及文件：`src/etl_agent/infrastructure/object_store.py`、`src/etl_agent/infrastructure/file_profiling.py`、`src/etl_agent/api/file_assets.py`、`migrations/versions/0004_file_assets.py`、`tests/unit/test_file_assets.py`
+
+## 2026-08-25：M2.2 SecretProvider、连接测试与只读 Profile 完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：按阶段顺序补齐连接与 Profile 核心能力
+- 根因与解决过程：新增 Vault KV v2 `SecretProvider`，实现 SecretRef 路径规范化和错误脱敏；新增 MySQL/Doris 兼容连接测试和 `SELECT 1` 只读探针；实现 information_schema Schema、近似行数、限额样本、字段脱敏和 SHA-256 Profile 指纹；连接测试与 Profile API 增加项目成员校验。
+- 未完成：MinIO 文件资产、上传大小限制和文件 Profile；PostgreSQL/Oracle/ClickHouse 适配器留待连接器扩展。
+- 验证证据：SecretRef、连接探针和 Profile 单元测试通过；真实业务库探查需配置对应 Vault SecretRef 后执行集成测试。
+- 涉及文件：`src/etl_agent/infrastructure/secrets.py`、`src/etl_agent/infrastructure/connection_testing.py`、`src/etl_agent/infrastructure/profiling.py`、`src/etl_agent/api/connections.py`、`tests/unit/test_m2_2.py`
+
+## 2026-08-25：M1.2 本地认证与项目职责上下文完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：按里程碑顺序补齐 M1 控制面基础
+- 根因与解决过程：新增 scrypt 密码哈希、JWT 访问令牌、认证依赖、development 本地注册/登录、项目查询与创建、成员管理和职责槽冲突校验；新增用户密码哈希迁移 `0003_user_password_hash`。项目资源查询依赖当前用户成员关系，Checker 不得与 Maker/Operator 兼任。
+- 未完成：企业 OIDC/LDAP/SSO、细粒度审计和完整结构化日志接入。
+- 涉及文件：`src/etl_agent/infrastructure/security.py`、`src/etl_agent/api/auth.py`、`src/etl_agent/api/auth_dependencies.py`、`src/etl_agent/api/projects.py`、`migrations/versions/0003_user_password_hash.py`、`tests/unit/test_security.py`
+
+## 2026-08-25：M2.1 连接登记与 Profile 契约基础完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 2 连接与 Profile 的首个可验证切片
+- 根因与解决过程：新增项目级 `connections` 和 `metadata_profiles` ORM 模型及 Alembic 迁移；实现连接登记、项目连接查询和最近 Profile 查询 API；Pydantic 请求模型拒绝密码、Token、API Key 等敏感扩展字段，业务表仅保留 `secret_ref`。
+- 未完成：Vault SecretProvider、真实连接测试、MySQL/Doris 只读探查、脱敏样本生成和 MinIO 文件资产。
+- 涉及文件：`src/etl_agent/api/connection_models.py`、`src/etl_agent/api/connections.py`、`src/etl_agent/infrastructure/database.py`、`src/etl_agent/infrastructure/models.py`、`migrations/versions/0002_connections_profiles.py`、`tests/unit/test_connections.py`
+
+## 2026-08-25：M1.1 控制面基础实现完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 1 控制面基础的首批开发任务
+- 根因与解决过程：新增 Pydantic Settings 配置加载、FastAPI `/health` 和 `/api/v1/health`、请求 ID、统一错误响应、PostgreSQL/Redis/MinIO/Vault/SeaTunnel/LLM 探针、Identity/Project 基础模型和 Alembic 初始迁移；VM 数据库已升级到 `0001_identity_project`，实时健康检查返回 200。
+- 验证证据：5 个 pytest 通过，Ruff 格式/规则、Mypy、`uv lock --check` 通过；PostgreSQL `select 1`、Redis PING、MinIO/Vault health 和 SeaTunnel TCP 均通过。
+- 未完成：JWT 登录、租户上下文、用户/项目/成员/角色 API 和职责分离测试。
+- 涉及文件：`src/etl_agent/`、`migrations/`、`alembic.ini`、`tests/unit/`、`pyproject.toml`、`uv.lock`、`docs/development/首期开发手册_DevelopmentHandbook.md`
+
 ## 2026-08-25：阶段 0 网络与依赖健康检查通过
 
 - 级别：开发环境/验证

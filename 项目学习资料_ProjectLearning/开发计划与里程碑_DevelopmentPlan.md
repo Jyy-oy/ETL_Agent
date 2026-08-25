@@ -22,17 +22,45 @@
 
 ## 里程碑 M1：控制面基础
 
+当前进度：M1.2 本地认证、项目成员上下文和职责槽 API 已完成；企业 OIDC/SSO 仍属于后续扩展。
+
+- [x] 配置加载、请求 ID、统一错误结构和 `/health` 基础 API。
+- [x] PostgreSQL/Redis/MinIO/Vault/SeaTunnel/LLM 配置探针。
+- [x] Alembic 初始迁移：`users`、`projects`、`project_memberships`、`project_role_grants`。
+- [x] JWT 认证、本地开发用户注册/登录和项目成员上下文。
+- [x] 用户/项目/成员/角色管理 API 及职责槽冲突测试。
+- [ ] 企业 OIDC/LDAP/SSO 适配器。
+
 交付：FastAPI `/health`、配置加载、数据库迁移、用户/项目/成员/角色、统一错误和 request ID。
 
 完成条件：租户隔离和职责槽有单元/API 测试。
 
 ## 里程碑 M2：连接与 Profile
 
+当前进度：M2.3 文件资产和文件 Profile 已完成；真实 MySQL/Doris、MinIO 集成验收仍需配置业务数据源后执行。
+
+- [x] 连接和元数据 Profile ORM 模型及 Alembic 迁移。
+- [x] 项目级连接登记/查询 API，仅保存非敏感参数和 `SecretRef`。
+- [x] Profile 稳定响应模型和最近快照查询 API。
+- [x] 敏感字段不得通过 `options` 绕过 SecretRef 的单元测试。
+- [x] Vault KV v2 SecretProvider 与 MySQL/Doris 连接测试适配器。
+- [x] MySQL/Doris 只读 Schema、近似行数、脱敏样本和 SHA-256 Profile 指纹。
+- [x] MinIO 文件资产、上传大小限制和 CSV/JSON/XLSX/Parquet 文件 Profile。
+
 交付：MySQL/Doris 连接、SecretRef、连接测试、只读 Profile、脱敏样本和 MinIO 文件资产。
 
 完成条件：无 Secret 明文泄露，Profile 摘要可复用。
 
 ## 里程碑 M3：Agent 生成
+
+当前进度：M3.1 已完成结构化生成、澄清回答恢复和版本冻结切片；真实百炼验收和跨请求恢复的自动化集成测试仍待补齐。
+
+- [x] EtlPlan、Profile 引用、QualityContract、RuntimeBudget 和 ValidationIssue 严格模型。
+- [x] OpenAI-compatible 远端 Provider、超时/有限重试、脱敏请求和 fake Provider。
+- [x] LangGraph 意图检查、Profile 摘要、候选生成、Schema/HOCON 校验、确定性门禁和一次修复。
+- [x] PostgreSQL Checkpoint 封装、Pipeline/不可变 PipelineVersion/AgentRun/GenerationAttempt 迁移和最小生成 API。
+- [x] 澄清回答 `/api/v1/agent-runs/{run_id}/answers` 与同一 thread 的 API 恢复。
+- [ ] 使用 VM PostgreSQL 执行 Checkpoint setup 和真实百炼脱敏调用验收。
 
 交付：LLMProvider、LangGraph、Checkpoint、澄清中断、EtlPlan/HOCON 结构化输出、门禁和不可变版本。
 

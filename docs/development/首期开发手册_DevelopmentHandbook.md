@@ -25,22 +25,44 @@
 
 ### 阶段 1：控制面基础
 
+M1.1/M1.2 已完成：配置加载、请求 ID、统一错误结构、`/health` 依赖探针、Identity/Project 基础模型、Alembic 迁移、本地 JWT、项目成员上下文和职责槽 API 已落地。启动本机 API 和执行迁移：
+
+```bash
+uv run alembic upgrade head
+uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
+```
+
+访问 `GET /health` 可检查 PostgreSQL、Redis、MinIO、Vault、SeaTunnel 和 LLM 配置状态；本阶段不在健康检查中调用真实百炼接口。
+
 - FastAPI `/health` 和统一错误响应。
 - SQLAlchemy/Alembic、租户上下文、用户/项目/成员/角色槽。
 - 结构化日志、请求 ID、配置加载和依赖就绪检查。
 
+本地开发账号使用 `POST /api/v1/auth/register` 注册、`POST /api/v1/auth/login` 登录；注册接口仅在 `APP_ENV=development` 开放。访问项目资源时必须携带 `Authorization: Bearer <access_token>`，项目列表只返回当前用户的有效成员关系。创建项目会建立初始 Maker 和 Operator 槽，Checker 不得与 Maker/Operator 兼任。
+
 ### 阶段 2：连接与 Profile
 
+- M2.1/M2.2/M2.3 已完成连接、数据库 Profile 和文件资产基础：`connections`、`metadata_profiles`、`file_assets` 模型和迁移、项目连接登记/查询 API、Vault KV v2 SecretProvider、MySQL/Doris 连接测试、只读 Schema/近似行数/脱敏样本、MinIO 上传和文件 Profile；连接响应只返回 `SecretRef`，不接受 `options.password` 等敏感字段。
 - 连接配置只保存 Secret 引用，不保存密码明文。
-- 连接测试和只读权限检查。
+- 连接测试和只读权限检查；当前适配器只允许 `SELECT 1`、information_schema 查询和限额样本查询。
 - Schema、字段类型、近似统计和脱敏样本的稳定 JSON 契约。
 - MinIO 文件资产元数据和上传大小限制。
 
+调用 `POST /api/v1/connections/{connection_id}/tests` 会解析 Vault `SecretRef` 并执行 MySQL/Doris `SELECT 1`。调用 `POST /api/v1/connections/{connection_id}/profiles` 可传入 `table_names` 和 `sample_rows`，服务端只保存脱敏后的 Profile 快照；不支持的数据库类型会返回稳定错误，不会自动降级为写操作。
+
+调用 `POST /api/v1/file-assets` 时使用 multipart 字段 `project_id` 和 `file`。服务端先流式计算大小与 SHA-256，再解析 CSV/JSON/XLSX/Parquet 的有限样本并脱敏，随后把原文件上传到 MinIO，只在 PostgreSQL 保存对象键、摘要和文件 Profile。默认上传上限由 `MAX_UPLOAD_SIZE_BYTES` 控制。
+
 ### 阶段 3：LangGraph 生成
 
-- 以明确状态模型实现意图解析、缺参中断、回答恢复和 PostgreSQL Checkpoint。
-- 百炼输出必须经过 Pydantic/JSON Schema 结构校验；模型不能决定权限、资源范围或审批人。
-- 生成 EtlPlan/HOCON 后执行确定性门禁和有限自动修复。
+- M3.1 已完成最小可验证切片：`GenerationRequest`、`EtlPlan`、`QualityContract`、`RuntimeBudget` 和 Profile 引用模型位于 `src/etl_agent/domain/generation.py`。
+- LangGraph 节点已按 `IntentParseNode → ProfileEnrichmentNode → CandidateGenerationNode → SchemaValidationNode → HoconCompileNode → DeterministicGateNode → RepairNode` 编排；缺少 Profile 或增量字段时返回 `needs_clarification`，不调用 LLM。
+- 百炼通过 OpenAI-compatible `LLMProvider` 适配器调用，具备超时、有限重试、JSON 解析、脱敏和 API Key 不落日志保护；`FakeLLMProvider` 用于离线测试。
+- 候选必须通过 Pydantic/JSON Schema、Profile/字段引用、预算上限和 PyHOCON 编译校验；非法候选最多自动修复一次，超限返回 `validation_failed`，不能冻结版本。
+- `POST /api/v1/pipelines` 创建 Pipeline，`POST /api/v1/pipelines/{pipeline_id}/versions` 创建草稿，`POST /api/v1/versions/{version_id}/generation` 运行生成；门禁通过才写入 SHA-256 摘要并将版本标记为 immutable。
+- PostgreSQL Checkpoint 使用 `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`；API 每次生成使用配置的 `LANGGRAPH_CHECKPOINT_DATABASE_URL`，生产部署应确保同一 thread_id 复用同一数据库。
+- Windows/PyCharm 入口 `src/etl_agent/main.py` 会切换到 `WindowsSelectorEventLoopPolicy`，因为 psycopg 异步连接不支持默认 Proactor loop；不要直接绕过 `etl_agent.main:app` 创建异步 Checkpoint。
+- `POST /api/v1/agent-runs/{run_id}/answers` 会合并澄清答案，复用 AgentRun 的脱敏请求快照和原 `thread_id` 从 PostgreSQL Checkpoint 恢复；当前只允许更新澄清参数，不允许通过答案修改项目权限或资源预算。
+- 当前限制：真实百炼调用的集成验收留待配置非生产 API Key 后执行；本地单元测试使用 fake Provider，不会发送业务数据。
 
 ### 阶段 4：Harness 协议
 

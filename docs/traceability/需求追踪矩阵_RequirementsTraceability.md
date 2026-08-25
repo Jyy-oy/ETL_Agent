@@ -7,8 +7,8 @@
 | REQ-SEC-01 | 用户、项目、成员和职责分离 | Identity/Access | 系统详细设计、威胁模型 | 自批/职责混用测试 |
 | REQ-DATA-01 | MySQL/Doris 连接与只读 Profile | Connection/Profile | 系统架构、系统详细设计 | 连接测试、脱敏 Profile |
 | REQ-DATA-02 | 文件/对象资产 | FileAsset + MinIO | 系统架构 | 文件头/格式/大小测试 |
-| REQ-AGENT-01 | LangGraph 澄清、Checkpoint 恢复 | Workflow | 系统详细设计、受管执行时序图 | 中断/恢复集成测试 |
-| REQ-AGENT-02 | EtlPlan/HOCON 结构化生成和校验 | LLM Gateway + Gate | 系统详细设计 | 非法输出/Schema/HOCON 测试 |
+| REQ-AGENT-01 | LangGraph 澄清、Checkpoint 恢复 | `src/etl_agent/workflows/graph.py`、`checkpoint.py`、`api/generation.py` | 系统详细设计、受管执行时序图 | `test_m3_generation.py` 缺参测试；VM PostgreSQL setup 和同 thread 恢复已手工验证 |
+| REQ-AGENT-02 | EtlPlan/HOCON 结构化生成和校验 | `domain/generation.py`、`workflows/validation.py`、`infrastructure/llm.py` | 系统详细设计 | `tests/unit/test_m3_generation.py` 合法/非法/预算/HOCON/Provider 测试 |
 | REQ-HARNESS-01 | PDP P0-P3 风险和三阶段协议 | Harness | 系统架构、系统详细设计 | PDP、Prepare/Approve/Commit 测试 |
 | REQ-HARNESS-02 | Ed25519 单次 Capability 和防重放 | Capability + Redis Guard | 安全设计、UML 类图 | 伪造/过期/重放测试 |
 | REQ-HARNESS-03 | Outbox 和 Evidence Ledger | PostgreSQL Outbox/Ledger | 系统详细设计 | 事务失败、幂等、哈希链测试 |
@@ -28,4 +28,4 @@
 
 ## 2. 当前缺口
 
-由于仓库目前处于源码初始化阶段，矩阵中的模块路径、迁移版本、测试 ID 和 CI 链接尚未生成。实现每个阶段后应补齐这些字段，并在发布报告中导出当前矩阵。
+仓库已完成 M1.2 控制面基础、M2.3 连接/Profile/文件资产核心能力和 M3.1 Agent 生成切片；SecretProvider、MySQL/Doris 连接测试、脱敏 Profile、文件校验、EtlPlan/HOCON 门禁和 fake Provider 已具备单元测试。真实业务库、MinIO 和百炼调用仍待配置业务数据与非生产 API Key 后补齐矩阵字段。

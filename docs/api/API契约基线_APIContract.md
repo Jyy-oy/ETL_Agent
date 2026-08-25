@@ -32,13 +32,24 @@
 | 方法 | 路径 | 用途 | 主要角色 |
 | --- | --- | --- | --- |
 | GET | `/health` | 依赖就绪状态 | 匿名/运维 |
+| POST | `/auth/register` | 开发环境创建本地用户 | 匿名（仅 development） |
+| POST | `/auth/login` | 签发 JWT 访问令牌 | 匿名 |
+| GET | `/auth/me` | 查询当前用户 | Authenticated |
+| POST | `/projects` | 创建项目并建立初始职责槽 | Authenticated |
+| GET | `/projects` | 查询当前用户所属项目 | Authenticated |
+| GET | `/projects/{project_id}/members` | 查询项目成员和职责槽 | Project Member |
+| POST | `/projects/{project_id}/members` | 添加成员并分配职责槽 | Project Operator |
 | GET | `/projects/{project_id}/connections` | 查询项目连接 | Project Member |
 | POST | `/connections` | 创建连接和 SecretRef | Maker |
+| GET | `/connections/{connection_id}/profiles/latest` | 查询最近一次元数据 Profile | Project Member |
 | PUT | `/connections/{id}` | 更新连接配置 | Maker/Operator |
 | POST | `/connections/{id}/tests` | 测试连接 | Maker |
 | POST | `/connections/{id}/profiles` | 发起只读 Profile | Maker |
 | POST | `/file-assets` | 上传并解析文件 | Maker |
+| GET | `/projects/{project_id}/file-assets` | 查询项目文件资产 | Project Member |
+| GET | `/file-assets/{asset_id}` | 查询文件资产和脱敏 Profile | Project Member |
 | POST | `/pipelines` | 创建 Pipeline | Maker |
+| POST | `/pipelines/{pipeline_id}/versions` | 创建可生成草稿版本 | Maker/Operator |
 | POST | `/versions/{version_id}/generation` | 启动/恢复生成 | Maker |
 | POST | `/agent-runs/{run_id}/answers` | 提交澄清回答 | Maker |
 | GET | `/versions/{version_id}/design` | 查询 EtlPlan/HOCON/质量规则 | Project Member |
@@ -55,8 +66,8 @@
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 查询、幂等重复请求返回已有结果 |
-| 201 | 同步创建资源 |
-| 202 | Agent、Profile、执行和 Benchmark 等异步任务已受理 |
+| 201 | 同步创建资源；当前 M2.2 Profile 探查在受限线程中同步完成并返回快照 |
+| 202 | Agent、执行和 Benchmark 等异步任务已受理；Profile 后续接入 Celery 后切换为此状态码 |
 | 400 | 请求结构或业务参数无效 |
 | 401 | 未认证或令牌无效 |
 | 403 | 已认证但无项目/角色/工具权限 |
