@@ -1,0 +1,66 @@
+@startuml ETLAgentLifecycleSequence
+title ETL-Agent Generation and Governed Execution
+autonumber
+
+actor Maker
+actor Checker1
+actor Checker2
+actor Operator
+participant API as "FastAPI Control Plane"
+participant Graph as "LangGraph Workflow"
+participant LLM as "Bailian LLM Provider"
+database DB as "PostgreSQL"
+participant PDP as "Policy Decision Point"
+participant Broker as "Tool Broker"
+queue Outbox
+participant Worker as "Celery Worker"
+participant Engine as "SeaTunnel Zeta"
+participant Target as "Target Database"
+
+Maker -> API: POST generation(request)
+API -> Graph: start AgentRun
+Graph -> DB: load Profile + checkpoint
+Graph -> LLM: structured generation(redacted profile)
+LLM --> Graph: EtlPlan/HOCON candidate
+Graph -> Graph: schema + deterministic gate
+alt missing parameter or invalid candidate
+  Graph --> API: interrupt(question/errors)
+  API --> Maker: clarification request
+  Maker -> API: POST answer
+  API -> Graph: resume checkpoint
+else gate passed
+  Graph -> DB: freeze PipelineVersion + SHA-256
+  Graph --> API: candidate ready
+end
+
+Maker -> API: POST prepare(version)
+API -> PDP: decide(ToolIntent, scope, classification)
+PDP --> API: risk + required role slots
+API -> DB: freeze Preparation
+API --> Maker: Preparation
+
+Checker1 -> API: approve(data dimension)
+API -> DB: ApprovalRequest decision
+Checker2 -> API: approve(security dimension)
+API -> DB: ApprovalRequest decision
+
+Operator -> API: POST commit(preparation)
+API -> DB: verify fingerprint + approvals
+API -> Broker: issue single-use Capability
+Broker -> DB: transaction(ExecutionRun + Outbox)
+Broker --> API: execution_run_id
+Outbox -> Worker: deliver authorized command
+Worker -> Broker: verify Capability + replay guard
+Worker -> Engine: submit bounded job
+Engine -> Target: shadow write + error routing
+Engine --> Worker: metrics/status
+Worker -> DB: snapshots + audit events
+
+alt quality passed
+  Worker -> Engine: atomic swap
+else budget exceeded or failure
+  Worker -> Engine: cancel / cleanup / rollback
+end
+Worker --> API: final status + quality report
+API --> Operator: execution result
+@enduml

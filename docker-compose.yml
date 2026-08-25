@@ -1,0 +1,113 @@
+name: etl-agent
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-etl_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-etl_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-etl_agent_dev}
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-etl_agent} -d ${POSTGRES_DB:-etl_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [etl_agent]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [etl_agent]
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [etl_agent]
+
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-etl-agent}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}";
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}";
+        mc anonymous set none "local/$${MINIO_BUCKET}";
+    networks: [etl_agent]
+
+  vault:
+    image: hashicorp/vault:1.17
+    restart: unless-stopped
+    cap_add: ["IPC_LOCK"]
+    command: ["server", "-dev", "-dev-root-token-id=${VAULT_TOKEN:-dev-only-token}"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-dev-only-token}
+      VAULT_ADDR: http://0.0.0.0:8200
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${VAULT_PORT:-8200}:8200"
+    volumes:
+      - vault_data:/vault/file
+    networks: [etl_agent]
+
+  # Optional data-plane service. Start with:
+  # docker compose --profile data-plane up -d seatunnel
+  seatunnel:
+    image: apache/seatunnel:2.3.10
+    profiles: ["data-plane"]
+    restart: unless-stopped
+    command: ["/opt/seatunnel/bin/seatunnel-cluster.sh"]
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${SEATUNNEL_PORT:-5801}:5801"
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${SEATUNNEL_HTTP_PORT:-5802}:5802"
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${SEATUNNEL_MEMBER_PORT:-5803}:5803"
+    volumes:
+      - seatunnel_logs:/opt/seatunnel/logs
+      - ./seatunnel/config:/opt/seatunnel/config:ro
+    networks: [etl_agent]
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  vault_data:
+  seatunnel_logs:
+
+networks:
+  etl_agent:
+    driver: bridge

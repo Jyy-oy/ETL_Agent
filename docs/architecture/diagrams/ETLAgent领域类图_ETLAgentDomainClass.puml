@@ -1,0 +1,161 @@
+@startuml ETLAgentDomainClass
+title ETL-Agent MVP Domain Class Model
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+package Identity {
+  class User <<entity>> {
+    +id: UUID
+    +username: string
+    +status: UserStatus
+  }
+  class Project <<entity>> {
+    +id: UUID
+    +code: string
+    +name: string
+  }
+  class ProjectMembership <<entity>> {
+    +project_id: UUID
+    +user_id: UUID
+    +role: ProjectRole
+  }
+  class ProjectRoleGrant <<entity>> {
+    +role_slot: RoleSlot
+    +granted_at: datetime
+  }
+  Project "1" o-- "many" ProjectMembership
+  Project "1" o-- "many" ProjectRoleGrant
+  User "1" -- "many" ProjectMembership
+  User "1" -- "many" ProjectRoleGrant
+}
+
+package Profile {
+  class ConnectionProfile <<entity>> {
+    +id: UUID
+    +kind: ConnectionKind
+    +secret_ref: string
+    +status: ProfileStatus
+  }
+  class MetadataProfile <<entity>> {
+    +id: UUID
+    +schema_json: JSON
+    +sample_digest: string
+    +created_at: datetime
+  }
+  class FileAsset <<entity>> {
+    +id: UUID
+    +object_uri: string
+    +format: string
+    +size_bytes: int
+  }
+  Project "1" o-- "many" ConnectionProfile
+  Project "1" o-- "many" FileAsset
+  ConnectionProfile "1" o-- "many" MetadataProfile
+}
+
+package Pipeline {
+  class Pipeline <<entity>> {
+    +id: UUID
+    +code: string
+    +status: PipelineStatus
+  }
+  class PipelineVersion <<entity>> {
+    +id: UUID
+    +version_number: int
+    +artifact_digest: string
+    +is_immutable: bool
+  }
+  class PipelineArtifact <<entity>> {
+    +artifact_type: ArtifactType
+    +object_uri: string
+    +artifact_digest: string
+  }
+  class QualityContract <<value object>>
+  class RuntimeSupervisionContract <<value object>>
+  Project "1" o-- "many" Pipeline
+  Pipeline "1" o-- "many" PipelineVersion
+  PipelineVersion "1" o-- "many" PipelineArtifact
+  PipelineVersion "1" *-- "1" QualityContract
+  PipelineVersion "1" *-- "1" RuntimeSupervisionContract
+  PipelineVersion "many" --> "many" MetadataProfile : references
+}
+
+package Workflow {
+  class AgentRun <<entity>> {
+    +id: UUID
+    +thread_id: string
+    +status: AgentRunStatus
+    +step_count: int
+  }
+  class ConversationMessage <<entity>>
+  class GenerationAttempt <<entity>>
+  AgentRun "1" o-- "many" ConversationMessage
+  AgentRun "1" o-- "many" GenerationAttempt
+  AgentRun "many" --> "1" PipelineVersion
+}
+
+package Governance {
+  class Preparation <<entity>> {
+    +id: UUID
+    +input_fingerprint: string
+    +risk_level: RiskLevel
+    +status: PreparationStatus
+  }
+  class ApprovalRequest <<entity>> {
+    +required_role: RoleSlot
+    +decision: ApprovalDecision
+    +status: ApprovalStatus
+  }
+  class CapabilityGrant <<entity>> {
+    +token_digest: string
+    +expires_at: datetime
+    +consumed_at: datetime
+  }
+  Preparation "1" o-- "many" ApprovalRequest
+  Preparation "1" o-- "0..1" CapabilityGrant
+  ApprovalRequest "many" --> "1" User : approver
+  Preparation "many" --> "1" PipelineVersion
+}
+
+package Execution {
+  class ExecutionRun <<entity>> {
+    +id: UUID
+    +engine_job_id: string
+    +status: ExecutionStatus
+    +input_records: bigint
+    +output_records: bigint
+  }
+  class RuntimeSnapshot <<entity>>
+  class OutboxEvent <<entity>>
+  class AuditEvent <<entity>>
+  ExecutionRun "1" o-- "many" RuntimeSnapshot
+  ExecutionRun "1" o-- "many" OutboxEvent
+  User "1" --> "many" AuditEvent : actor
+  Project "1" o-- "many" AuditEvent
+  ExecutionRun "many" --> "1" Preparation
+}
+
+package Ports {
+  interface LLMProvider <<port>> {
+    +generate_structured(request, schema)
+    +ask_clarification(context)
+  }
+  interface SourceConnector <<port>> {
+    +test_connection(profile)
+    +inspect_metadata(profile, budget)
+  }
+  interface ExecutionEngine <<port>> {
+    +submit(command)
+    +get_status(job_ref)
+    +cancel(job_ref)
+  }
+  interface SecretProvider <<port>> {
+    +resolve(secret_ref)
+    +rotate(secret_ref)
+  }
+  LLMProvider ..> PipelineVersion : candidate
+  SourceConnector ..> MetadataProfile : produces
+  ExecutionEngine ..> ExecutionRun : updates
+  SecretProvider ..> ConnectionProfile : resolves
+}
+@enduml

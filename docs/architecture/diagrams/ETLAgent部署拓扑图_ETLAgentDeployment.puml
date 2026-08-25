@@ -1,0 +1,35 @@
+@startuml ETLAgentDeployment
+title ETL-Agent MVP Deployment Topology
+skinparam componentStyle rectangle
+
+node "Windows Development Workstation" as win {
+  component "PyCharm / uv" as ide
+  component "FastAPI + LangGraph" as local_api
+  component "Vue Dev Server" as vue
+}
+
+node "Ubuntu VM 192.168.181.128" as vm {
+  node "Docker Compose" as compose {
+    database "PostgreSQL 16" as pg
+    component "Redis 7" as redis
+    component "MinIO" as minio
+    component "Vault KV v2\n(dev mode)" as vault
+    component "SeaTunnel Zeta\n(optional profile)" as seatunnel
+  }
+}
+
+cloud "Remote Bailian Platform" as bailian
+database "Source MySQL" as source
+database "Target Doris" as target
+
+ide --> local_api
+vue --> local_api : HTTP
+local_api --> pg : PostgreSQL
+local_api --> redis : Redis
+local_api --> minio : S3 API
+local_api --> vault : SecretProvider
+local_api --> bailian : HTTPS / OpenAI-compatible
+local_api --> seatunnel : Tool Broker / job API
+seatunnel --> source : read-only
+seatunnel --> target : shadow + swap
+@enduml

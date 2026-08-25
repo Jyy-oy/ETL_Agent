@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+build/
+dist/
+wheelhouse/
+pip-wheel-metadata/
+
+# uv and local package caches
+.uv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+*.keystore
+
+# Application runtime data
+var/
+runtime/
+logs/
+*.log
+celerybeat-schedule
+celerybeat.pid
+
+# Benchmark and generated artifacts that may contain source data
+benchmarks/results/
+artifacts/
+uploads/
+var/uploads/
+var/exports/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+node_modules/
+.npm/
+.pnpm-store/
+
+# SeaTunnel local files
+seatunnel/logs/
+seatunnel/outputs/
+seatunnel/plugins/
+*.jute
+
+# MinIO and Vault local state
+minio-data/
+vault-data/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak

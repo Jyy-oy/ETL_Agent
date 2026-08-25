@@ -1,0 +1,101 @@
+@startuml ETLAgentER
+title ETL-Agent MVP Logical ER Model
+hide methods
+hide stereotypes
+
+entity users {
+  * id : uuid <<PK>>
+  --
+  username : varchar <<UK>>
+  status : varchar
+  created_at : timestamptz
+}
+entity projects {
+  * id : uuid <<PK>>
+  --
+  code : varchar
+  name : varchar
+}
+entity project_memberships {
+  * id : uuid <<PK>>
+  --
+  project_id : uuid <<FK>>
+  user_id : uuid <<FK>>
+  role : varchar
+}
+entity pipelines {
+  * id : uuid <<PK>>
+  --
+  project_id : uuid <<FK>>
+  code : varchar
+}
+entity pipeline_versions {
+  * id : uuid <<PK>>
+  --
+  pipeline_id : uuid <<FK>>
+  version_number : int
+  artifact_digest : varchar <<UK>>
+  is_immutable : boolean
+}
+entity metadata_profiles {
+  * id : uuid <<PK>>
+  --
+  project_id : uuid <<FK>>
+  connection_id : uuid <<FK>>
+  schema_json : jsonb
+}
+entity preparations {
+  * id : uuid <<PK>>
+  --
+  version_id : uuid <<FK>>
+  input_fingerprint : varchar
+  risk_level : varchar
+  status : varchar
+}
+entity approval_requests {
+  * id : uuid <<PK>>
+  --
+  preparation_id : uuid <<FK>>
+  required_role : varchar
+  approver_id : uuid <<FK>>
+  decision : varchar
+}
+entity execution_runs {
+  * id : uuid <<PK>>
+  --
+  preparation_id : uuid <<FK>>
+  version_id : uuid <<FK>>
+  engine_job_id : varchar
+  status : varchar
+}
+entity outbox_events {
+  * id : uuid <<PK>>
+  --
+  aggregate_id : uuid
+  event_type : varchar
+  status : varchar
+  next_attempt_at : timestamptz
+}
+entity audit_events {
+  * id : uuid <<PK>>
+  --
+  project_id : uuid <<FK>>
+  actor_id : uuid <<FK>>
+  prev_event_hash : varchar
+  event_hash : varchar
+}
+
+users ||--o{ project_memberships
+projects ||--o{ project_memberships
+projects ||--o{ pipelines
+pipelines ||--o{ pipeline_versions
+projects ||--o{ metadata_profiles
+pipeline_versions ||--o{ preparations
+preparations ||--o{ approval_requests
+preparations ||--o{ execution_runs
+pipeline_versions ||--o{ execution_runs
+execution_runs ||--o{ outbox_events
+projects ||--o{ audit_events
+users ||--o{ audit_events
+users ||--o{ approval_requests : approver
+@enduml
