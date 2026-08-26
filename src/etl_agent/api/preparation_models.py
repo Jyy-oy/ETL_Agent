@@ -59,6 +59,12 @@ class ApprovalDecisionRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+class ExecutionActionRequest(BaseModel):
+    """声明取消或回滚的原因，原因会进入脱敏审计账本。"""
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class ApprovalRequestResponse(BaseModel):
     """返回审批槽、当前状态和已决策主体的最小摘要。"""
 
@@ -109,5 +115,39 @@ class ExecutionRunResponse(BaseModel):
     metrics: dict[str, Any]
     error_code: str | None
     error_detail: str | None
+    quality_status: str
+    publish_status: str
+    rollback_status: str
+    shadow_table: str | None
+    error_table: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class RuntimeSupervisionSnapshotResponse(BaseModel):
+    """返回一次运行监督快照，不暴露连接凭据或业务样本。"""
+
+    id: UUID
+    execution_run_id: UUID
+    engine_status: str
+    decision: str
+    observed_metrics: dict[str, Any]
+    exceeded_budget_fields: list[str]
+    detail: str | None
+    created_at: datetime
+
+
+class ExecutionQualityResultResponse(BaseModel):
+    """返回最终质量报告和影子/错误表引用。"""
+
+    id: UUID
+    execution_run_id: UUID
+    status: str
+    input_records: int
+    output_records: int
+    rejected_records: int
+    rejection_rate: float
+    report: dict[str, Any]
+    shadow_table: str | None
+    error_table: str | None
+    created_at: datetime

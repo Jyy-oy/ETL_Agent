@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -141,7 +142,10 @@ def _load_tables(
         rows = cursor.fetchall()
     tables: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
-        key = (str(row["table_schema"]), str(row["table_name"]))
+        key = (
+            str(_metadata_value(row, "table_schema")),
+            str(_metadata_value(row, "table_name")),
+        )
         table = tables.setdefault(
             key,
             {
@@ -153,10 +157,10 @@ def _load_tables(
         )
         table["columns"].append(
             {
-                "name": str(row["column_name"]),
-                "data_type": str(row["data_type"]),
-                "nullable": str(row["is_nullable"]).upper() == "YES",
-                "ordinal_position": int(row["ordinal_position"]),
+                "name": str(_metadata_value(row, "column_name")),
+                "data_type": str(_metadata_value(row, "data_type")),
+                "nullable": str(_metadata_value(row, "is_nullable")).upper() == "YES",
+                "ordinal_position": int(_metadata_value(row, "ordinal_position")),
             }
         )
     _load_estimated_counts(client, list(tables.values()), database_name)
@@ -188,7 +192,13 @@ def _load_estimated_counts(
     with client.cursor() as cursor:
         cursor.execute(query, params)
         rows = cursor.fetchall()
-    counts = {(str(row["table_schema"]), str(row["table_name"])): row["table_rows"] for row in rows}
+    counts = {
+        (
+            str(_metadata_value(row, "table_schema")),
+            str(_metadata_value(row, "table_name")),
+        ): _metadata_value(row, "table_rows")
+        for row in rows
+    }
     for table in tables:
         count = counts.get((table["schema"], table["name"]))
         table["estimated_row_count"] = int(count) if count is not None else None
@@ -209,6 +219,14 @@ def _load_samples(client: Any, tables: list[dict[str, Any]], sample_rows: int) -
             {str(key): _redact_value(str(key), value) for key, value in row.items()} for row in rows
         ]
     return samples
+
+
+def _metadata_value(row: Mapping[str, Any], field: str) -> Any:
+    """兼容不同 MySQL 驱动对 information_schema 列名大小写的返回差异。"""
+    for candidate in (field, field.lower(), field.upper()):
+        if candidate in row:
+            return row[candidate]
+    raise KeyError(field)
 
 
 def _quote_identifier(value: str) -> str:

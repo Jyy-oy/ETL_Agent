@@ -37,7 +37,7 @@
 
 ## 里程碑 M2：连接与 Profile
 
-当前进度：M2.3 文件资产和文件 Profile 已完成；真实 MySQL/Doris、MinIO 集成验收仍需配置业务数据源后执行。
+当前进度：M2.3 文件资产和文件 Profile 已完成；MySQL/Doris 使用 Compose 合成环境和脱敏样本学习验证，真实业务凭据不是首期前置条件。
 
 - [x] 连接和元数据 Profile ORM 模型及 Alembic 迁移。
 - [x] 项目级连接登记/查询 API，仅保存非敏感参数和 `SecretRef`。
@@ -69,7 +69,7 @@
 
 ## 里程碑 M4：Harness 与审批
 
-当前进度：M4.4 已完成 PDP、Prepare、独立 Checker 审批、Ed25519 Capability、Commit、ExecutionRun、Transactional Outbox 和 Evidence Ledger；Celery/SeaTunnel Worker 消费仍属于 M5。
+当前进度：M4.4 已完成 PDP、Prepare、独立 Checker 审批、Ed25519 Capability、Commit、ExecutionRun、Transactional Outbox 和 Evidence Ledger；Celery/SeaTunnel Worker 消费在 M5 完成。
 
 - [x] PDP v1 根据环境、写入意图、数据分级和预算输出 P0-P3 风险及 Checker 槽。
 - [x] Prepare 校验不可变 PipelineVersion 和 Profile 项目边界，冻结输入指纹、资源范围、预算和有效期。
@@ -84,19 +84,28 @@
 
 ## 里程碑 M5：数据面闭环
 
-前置准备：已在项目 Compose 增加 `source-target` profile，固定 MySQL 8.0.36 和 Doris 2.1.11 FE/BE 镜像；待 VM 完成拉取、资源和网络检查后再启动。
+当前进度：M5.5 真实合成数据面闭环已完成；VM 已启动 MySQL、Doris 和 SeaTunnel 2.3.10，学习项目使用确定性合成数据完成真实链路验收。
 
 - [x] M5.1 Celery 应用工厂、Outbox Tool Broker、Capability/Replay Guard 消费和 SeaTunnel Adapter 提交/状态/取消端口。
-- [ ] M5.2 真实 SeaTunnel Zeta 联调、影子表/错误表和合成数据初始化。
-- [ ] M5.3 QualityContract、运行监督、原子 Swap、取消和回滚。
+- [x] M5.2 SeaTunnel 2.3.10 Zeta REST 契约联调、原生状态/指标转换、影子表/错误表状态和合成 MySQL 数据脚本。
+- [x] M5.3 QualityContract、RuntimeBudget 监督、超限取消、失败清理、质量通过 Swap 请求、受管回滚 API 和审计快照。
+- [x] M5.4 合成 MySQL 数据、质量分流、取消和回滚的可重复学习验收；单元测试保留 SeaTunnel FakeSource/Mock 目标动作。
+- [x] M5.5 真实合成 MySQL → Doris HOCON、Doris 原子 DDL 适配器、影子表、原子 Swap/Rollback 和 Celery/Beat 端到端验收。
 
 交付：Celery Worker、SeaTunnel Adapter、影子表、错误表、QualityContract、RuntimeSupervision、Swap 和回滚。
 
-完成条件：MySQL → Doris 主链路可重复执行、取消、超限和回滚。
+完成条件：合成数据真实链路可重复执行、质量分流、取消和回滚；生产业务库接入、大数据量压测和高可用部署作为后续扩展。
 
 ## 里程碑 M6：前端与 Benchmark
 
-交付：连接/Profile、Pipeline Studio、审批、运行中心、L0/L1 Benchmark 和报告。
+当前进度：M6.1 Benchmark 历史摘要持久化已完成；实时推送、真实 L2 链路和企业 SSO 仍是后续扩展。
+
+- [x] Vue 3 + Vite + TypeScript 控制台：总览、连接/Profile、Pipeline Studio、审批工作台、运行中心和 Benchmark。
+- [x] 项目级 Pipeline/Version、Preparation、ExecutionRun 列表查询 API，按项目成员权限过滤。
+- [x] L0 基线、L1 故障注入的确定性 Benchmark API 和 CLI；报告绑定制品摘要、策略版本、环境和数据集摘要。
+- [x] M6 单元测试与前端生产构建验证。
+- [x] M6.1 Benchmark 运行事实表、项目级历史查询 API、单条报告查询和控制台历史列表。
+- [ ] 可选扩展：Benchmark MinIO 报告存档、SSE/WebSocket 实时指标、真实 L2 链路、OIDC/SSO。
 
 完成条件：关键用户路径可用，结果关联版本、策略和环境。
 

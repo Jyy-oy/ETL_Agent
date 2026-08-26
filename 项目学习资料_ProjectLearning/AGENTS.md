@@ -15,7 +15,7 @@ ETL-Agent 是面向企业数据集成的控制面平台：用自然语言生成�
 - Python 3.12 + uv；依赖和锁文件在根目录 `pyproject.toml`、`uv.lock`。
 - FastAPI + LangGraph + Celery 是控制面；PostgreSQL 16 保存业务事实、Checkpoint、Outbox 和审计；Redis 7 保存队列和短时防重放状态；MinIO 保存大对象；Vault 保存 SecretRef 对应凭据。
 - LLM 不在本地或 VM 部署，通过 `.env` 中的百炼 OpenAI 兼容配置远程调用。
-- Ubuntu VM 地址为 `192.168.181.128`；截至 2026-08-26，VM 已由 Docker Compose 启动 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel，核心基础设施均处于运行状态；SeaTunnel 使用不传 `-r` 的单节点默认 `MASTER_AND_WORKER` 角色。VM 端口已对开发机开放，Windows 到 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel 的 TCP/协议级检查均通过；仓库已有 `/health`、Identity/Project、连接/Profile、文件资产、M3.2 生成边界、澄清恢复、M4.4 Commit/ExecutionRun/Outbox/Evidence Ledger、M5.1 Celery Tool Broker/SeaTunnel Adapter 和 MySQL/Doris `source-target` Compose profile，真实 Zeta 联调、前端、质量分流、运行监督和合成数据初始化仍待实现。
+- Ubuntu VM 地址为 `192.168.181.128`；截至 2026-08-26，VM 已由 Docker Compose 启动 PostgreSQL、Redis、MinIO、Vault、MySQL、Doris 和 SeaTunnel，核心基础设施均处于运行状态；SeaTunnel 使用不传 `-r` 的单节点默认 `MASTER_AND_WORKER` 角色。VM 端口已对开发机开放，Windows 到 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel 的 TCP/协议级检查均通过；仓库已有 `/health`、Identity/Project、连接/Profile、文件资产、M3.2 生成边界、澄清恢复、M4.4 Commit/ExecutionRun/Outbox/Evidence Ledger、M5.5 Celery Tool Broker/SeaTunnel/真实 Doris 适配器/质量监督/取消回滚 API、M6/M6.1 Vue 控制台、项目级查询、Benchmark 历史摘要和 L0/L1 确定性 Benchmark、合成数据脚本和 MySQL/Doris `source-target` Compose profile，SeaTunnel 2.3.10 已通过合成 MySQL → Doris 影子表 → 原子 Swap/Rollback 验证；生产业务库、实时推送、真实 L2 压测和 SSO 仍待扩展。
 - Windows/PyCharm 是后续控制面开发环境；应用进入 Compose 后改用服务名通信。
 
 ## 3. 学习资料使用顺序
@@ -46,6 +46,7 @@ ETL-Agent 是面向企业数据集成的控制面平台：用自然语言生成�
 
 - [开发环境与依赖](../docs/development/开发环境与依赖_DevelopmentEnvironment.md)
 - [首期开发手册](../docs/development/首期开发手册_DevelopmentHandbook.md)
+- [项目测试手册](../docs/development/项目测试手册_ProjectTestingGuide.md)
 - [API 契约基线](../docs/api/API契约基线_APIContract.md)
 - [Ubuntu 虚拟机部署](../docs/operations/Ubuntu虚拟机部署_LocalVMDeployment.md)
 
@@ -63,7 +64,7 @@ ETL-Agent 是面向企业数据集成的控制面平台：用自然语言生成�
 | `项目学习路线_LearningRoadmap.md` | 从基础环境到生产级实现的学习顺序 |
 | `核心概念词典_Glossary.md` | 项目术语和缩写速查 |
 | `代码阅读指南_CodeReadingGuide.md` | 源码完成后的模块阅读顺序和观察点 |
-| `端到端流程演练_EndToEndWalkthrough.md` | 用一条 MySQL → Doris 链路理解全系统 |
+| `端到端流程演练_EndToEndWalkthrough.md` | 用一条合成 MySQL → VM Doris 真实链路理解全系统 |
 | `LLM模块学习指南_LLMModuleGuide.md` | 百炼调用、LangGraph 和结构化输出边界 |
 | `故障排查手册_TroubleshootingGuide.md` | Windows、VM、Docker 和依赖故障排查 |
 | `架构亮点与工程实践_ArchitectureHighlights.md` | 设计模式、工程取舍和评审要点 |

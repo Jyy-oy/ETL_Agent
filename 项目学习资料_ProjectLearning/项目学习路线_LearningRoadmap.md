@@ -16,7 +16,7 @@
 
 掌握：Profile、EtlPlan、PipelineVersion、QualityContract、影子表、四眼审批和三阶段协议。
 
-练习：用一张纸画出 MySQL → Doris 主链路，标注每一步的控制面事实和数据面动作。
+练习：用一张纸画出合成 MySQL → VM Doris 主链路，标注每一步的控制面事实和数据面动作。
 
 ## 阶段 2：后端和状态
 
@@ -49,3 +49,11 @@
 掌握：需求到测试追踪、发布/回滚、备份恢复、监控、审计、变更和 ADR。
 
 练习：为一个新增连接器写需求 ID、架构决策、API 变化、测试证据和回滚说明。
+
+## 阶段 6：控制台和 Benchmark
+
+阅读：[首期开发手册](../docs/development/首期开发手册_DevelopmentHandbook.md) 的阶段 6、`frontend/` 源码和 [测试策略](../docs/quality/测试与质量策略_TestStrategy.md) 的 Benchmark 部分。
+
+掌握：Vue 控制台如何消费稳定 API、前端不承担权限、L0/L1 合成基准如何绑定制品摘要/策略版本/环境，以及为什么真实 L2 链路必须单独隔离。
+
+练习：启动 FastAPI 和 `frontend`，完成项目选择、连接/Profile 查看、Pipeline 草稿、审批/运行查询；使用固定 `seed` 分别运行 L0 和 L1，比较拒绝率、Schema 覆盖率和 P0 拦截率。

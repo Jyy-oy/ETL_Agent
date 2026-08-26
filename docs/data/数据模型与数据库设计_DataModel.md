@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | 控制面事实 | users、projects、pipelines、approvals、runs | PostgreSQL | 事务性、可审计、可查询 |
 | 工作流状态 | agent_runs、checkpoint、messages | PostgreSQL | LangGraph 跨请求恢复 |
-| 大对象 | HOCON、文件、Benchmark、日志归档 | MinIO/S3 | 数据库保存 URI、摘要和元数据 |
+| 大对象 | HOCON、文件、Benchmark 详细报告、日志归档 | MinIO/S3 | 数据库保存 URI、摘要和元数据；M6.1 首期只持久化 Benchmark 摘要 |
 | 短时状态 | Capability 消费、队列、缓存 | Redis | 不作为业务事实唯一来源 |
 | Secret | 数据源凭据、运行时 Token | Vault/KMS | 业务表只保存 SecretRef |
 
@@ -31,6 +31,8 @@
 | `preparations` | 冻结事实、风险、预算和回滚 | 指纹和版本不可漂移 |
 | `execution_runs` | SeaTunnel 作业和运行指标 | 由 Commit 事务创建 |
 | `runtime_supervision_snapshots` | 运行时监督快照 | 按运行和时间索引 |
+| `execution_quality_results` | 质量契约评估和影子/错误表引用 | 每个执行最多一份最终报告 |
+| `benchmark_runs` | Benchmark 参数、摘要和统计指标 | 项目隔离，按项目/时间索引；不保存业务样本 |
 | `outbox_events` | 可靠投递命令 | event_id 幂等 |
 | `evidence_ledger_events` | 项目级追加式哈希链审计证据 | `project_id + sequence_number` 唯一，`prev_event_hash`/`event_hash` |
 | `audit_events` | 面向查询的业务审计索引 | 后续阶段从账本事件投影 |
@@ -48,6 +50,10 @@ M4.1 已落地 `preparations`（迁移 `0007_preparations`）。Prepare 只接�
 M4.2 已落地 `approval_requests`（迁移 `0008_approval_requests`）。Prepare 按 PDP 返回的 Checker 槽创建唯一审批请求；Approve 以行锁保护单槽决策和 Preparation 状态汇聚，拒绝申请人自批、无职责用户、过期 Preparation 和重复决策。所有槽批准后才进入 `approved`，任一槽拒绝则进入 `rejected`。
 
 M4.4 已落地 `execution_runs`、`outbox_events` 和 `evidence_ledger_events`（迁移 `0009_execution_outbox_ledger`）。Commit 重新读取版本/Profile 指纹并校验审批，在同一事务中写入排队状态的 ExecutionRun、`execution.submit` Outbox 命令和账本事件；ExecutionRun 只保存 Capability 摘要，Outbox 的内部 Capability 原文暂为 MVP 实现，生产阶段改用 Vault/KMS 信封加密。Preparation 与 ExecutionRun、Outbox 使用唯一约束支持重复 Commit 幂等。
+
+M5.2 已落地迁移 `0010_quality_supervision`：`execution_runs` 增加质量、发布、回滚和影子/错误表状态；`runtime_supervision_snapshots` 保存每次引擎查询的状态、预算决策和指标；`execution_quality_results` 保存 QualityContract 最终报告。取消、清理、Swap 和回滚动作使用独立 Outbox 事件和独立 Capability，Worker 重启后可从 PostgreSQL 事实恢复。
+
+M6.1 已落地迁移 `0011_benchmark_runs`：Benchmark 运行结果以项目、操作者、级别、固定数据参数、数据摘要、制品摘要、策略版本、环境和统计指标形式保存；控制台通过项目级列表或单条查询读取历史。只保存脱敏摘要，不保存合成业务样本或百炼密钥。
 
 ## 3. 关系约束
 

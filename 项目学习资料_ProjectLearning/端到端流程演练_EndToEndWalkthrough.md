@@ -1,6 +1,6 @@
 # ETL-Agent 端到端流程演练
 
-本文用“从 MySQL 抽取订单到 Doris”解释一条完整链路。示例中的表名、字段和数据均为虚构，重点是理解系统边界，不代表生产连接配置。
+本文用“从合成 MySQL 抽取订单到 VM Doris”解释一条完整链路。表名、字段和数据均为学习项目生成的合成内容，不使用真实业务库；数据面在 VM 上真实运行 SeaTunnel 2.3.10、Doris 影子表、原子 Swap 和 Rollback，单元测试才使用 Mock 适配器。
 
 ## 1. 连接与 Profile
 
@@ -59,13 +59,13 @@ Operator 提交 Commit 后，服务端重新计算指纹并检查审批事实。
 
 ## 5. Worker 和 SeaTunnel
 
-Celery Worker 消费 Outbox，验证 Capability 和 Replay Guard，通过 Tool Broker 调用 SeaTunnel。SeaTunnel 从 MySQL 读取数据，写入 Doris 影子表；违反质量契约的数据进入错误表并记录错误码。
+Celery Worker 消费 Outbox，验证 Capability 和 Replay Guard，通过 Tool Broker 调用 SeaTunnel。VM 演示使用合成 MySQL 作为真实源端，SeaTunnel 通过容器网络读取数据并写入 Doris 影子表；违反质量契约的数据进入错误表并记录错误码。FakeSource/Mock 仅用于不依赖 VM 的单元测试。
 
 控制面记录 Engine Job ID、读取/写入/拒绝行数、字节、耗时、吞吐、放大比和错误引用，不把海量数据经过 API 返回。
 
 ## 6. 发布、监督和回滚
 
-- 质量通过：Doris 原子 Swap 将影子表发布为正式表。
+- 质量通过：Doris 适配器执行 `ALTER TABLE ... REPLACE WITH TABLE ...` 原子 Swap，将影子表发布为正式表。
 - 预算超限：RuntimeSupervision 触发预警或 Kill Job。
 - 作业失败：保存失败快照，Operator 发起受管清理/回滚。
 - 重复取消或回滚：返回稳定状态，不重复破坏目标表。

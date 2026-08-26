@@ -116,7 +116,7 @@ M4.3 基础能力：`harness/capability.py` 使用 Ed25519 对 `capability.v1` �
 
 M4.4 实现：`POST /api/v1/preparations/{preparation_id}/commit` 使用 Preparation 行锁和版本/Profile 查询重新计算输入指纹；通过审批和有效期检查后签发 Capability，并在同一个 PostgreSQL 事务中创建 `ExecutionRun`、`OutboxEvent` 和 `EvidenceLedgerEvent`，将 Preparation 设置为 `committed`。重复 Commit 按 Preparation 唯一约束或 `Idempotency-Key` 返回已有执行事实；`GET /api/v1/execution-runs/{execution_id}` 只返回脱敏状态和摘要。Outbox 当前保存内部消费所需的 Capability 原文，生产部署必须改用 Vault/KMS 信封加密。
 
-M5.1 实现：`workers/dispatcher.py` 是 Outbox Tool Broker，消费前验签 Capability、校验 Preparation/制品绑定并执行 Redis Replay Guard，再通过 `ExecutionEngine` 端口调用 `SeaTunnelAdapter`。Celery 任务只负责调度事件 ID 和建立短生命周期依赖，不在进程内保存执行状态；真实 Zeta HTTP 路径通过配置注入，后续集成测试确认具体版本契约。
+M5.1/M5.2 实现：`workers/dispatcher.py` 是 Outbox Tool Broker，消费前验签 Capability、校验主体/Preparation/制品绑定并执行 Redis Replay Guard，再按事件类型通过 `ExecutionEngine` 端口调用 `SeaTunnelAdapter` 的提交、取消、清理、原子切换或回滚动作。Celery 任务只负责调度事件 ID、状态轮询和建立短生命周期依赖，不在进程内保存执行状态；`workers/supervision.py` 将引擎指标与冻结预算、QualityContract 比较，写入监督快照和质量报告，并自动生成后续动作 Outbox。SeaTunnel 2.3.10 的原生字段和指标在 Adapter 边界转换为控制面稳定模型；真实 REST 路径通过 `SEATUNNEL_*_PATH` 配置注入。
 
 ### Approve
 

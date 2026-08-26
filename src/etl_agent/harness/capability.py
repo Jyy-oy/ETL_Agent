@@ -130,7 +130,9 @@ def load_public_key(path: str) -> Ed25519PublicKey:
 class ReplayGuard(Protocol):
     """防重放端口，消费成功后同一令牌摘要只能返回一次。"""
 
-    async def consume_once(self, token: str, ttl_seconds: int) -> bool: ...
+    async def consume_once(self, token: str, ttl_seconds: int) -> bool:
+        """消费一次 Capability，返回是否为首次消费。"""
+        ...
 
 
 class RedisReplayGuard:

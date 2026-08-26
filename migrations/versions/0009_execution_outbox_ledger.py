@@ -56,9 +56,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("idempotency_key", name="uq_execution_runs_idempotency_key"),
         sa.UniqueConstraint("preparation_id", name="uq_execution_runs_preparation"),
     )
-    op.create_index(
-        "ix_execution_runs_project_status", "execution_runs", ["project_id", "status"]
-    )
+    op.create_index("ix_execution_runs_project_status", "execution_runs", ["project_id", "status"])
     op.create_index(
         "ix_execution_runs_project_created", "execution_runs", ["project_id", "created_at"]
     )

@@ -35,6 +35,36 @@ class ConnectionCreate(BaseModel):
         return value
 
 
+class ConnectionUpdate(BaseModel):
+    """更新连接的非敏感配置，密码仍只能通过 SecretRef 引用。"""
+
+    code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+    )
+    name: str | None = Field(default=None, min_length=1, max_length=256)
+    connection_type: ConnectionType | None = None
+    host: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, gt=0, le=65535)
+    database_name: str | None = Field(default=None, max_length=256)
+    username: str | None = Field(default=None, max_length=128)
+    secret_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    options: dict[str, Any] | None = None
+
+    @field_validator("options")
+    @classmethod
+    def reject_secret_options(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """拒绝在连接更新的扩展选项中写入密码或令牌。"""
+        if value is None:
+            return None
+        sensitive_keys = {key.lower() for key in value} & _SENSITIVE_OPTION_KEYS
+        if sensitive_keys:
+            raise ValueError(f"敏感字段必须通过 secret_ref 管理: {sorted(sensitive_keys)}")
+        return value
+
+
 class ConnectionResponse(BaseModel):
     """连接查询响应，明确不包含任何凭据字段。"""
 

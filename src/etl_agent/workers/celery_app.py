@@ -19,6 +19,12 @@ def create_celery_app(settings: Settings | None = None) -> Celery:
         worker_concurrency=app_settings.celery_worker_concurrency,
         task_acks_late=True,
         task_reject_on_worker_lost=True,
+        beat_schedule={
+            "etl-agent-publish-outbox": {
+                "task": "etl_agent.workers.publish_pending_outbox",
+                "schedule": max(1, app_settings.outbox_poll_interval_seconds),
+            }
+        },
     )
     return app
 

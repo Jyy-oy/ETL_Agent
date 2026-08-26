@@ -48,10 +48,11 @@ curl http://127.0.0.1:8200/v1/sys/health
 | 现象 | 优先检查 | 处理 |
 | --- | --- | --- |
 | Compose 服务拉取慢 | Registry、DNS、磁盘、镜像大小 | 等待/换可信镜像/离线 `save/load` |
-| PostgreSQL refused | `docker compose ps`、端口绑定、用户密码 | 看健康状态和 `.env`，不要重建数据卷 |
+| PostgreSQL refused | `docker compose ps`、端口绑定、当前工作目录 | 确认项目根 `.env` 中使用 `192.168.181.128`；不要从未加载配置的目录覆盖环境变量，也不要重建数据卷 |
 | Redis ping 失败 | 服务状态、端口、逻辑库 URL | 检查 `REDIS_URL` 和容器日志 |
 | MinIO 访问失败 | endpoint 是主机地址还是服务名 | VM 主机用 VM IP，Compose 内用 `minio` |
 | Vault 401 | Token、KV mount、namespace | 开发模式只用于本地；检查 `VAULT_KV_MOUNT` |
+| 只读 Profile 探查失败 | 连接主机、SecretRef、`information_schema` 返回键名 | Windows 访问 VM 时把旧连接的 `127.0.0.1` 改为 `192.168.181.128`；若连接测试通过但 Profile 失败，确认 Profile 代码兼容 MySQL 大写元数据列名，并重启 FastAPI |
 | LLM timeout | Base URL、DNS、API Key、百炼配额 | 先用 curl/最小客户端验证，再看 Workflow |
 | Agent 无法恢复 | thread_id、Checkpoint DB、状态版本 | 查 AgentRun 和 PostgreSQL checkpoint |
 | Commit 被拒绝 | 指纹、审批槽、Capability、角色 | 查稳定错误码和 AuditEvent，不绕过检查 |

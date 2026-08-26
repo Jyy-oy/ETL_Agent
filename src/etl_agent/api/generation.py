@@ -185,6 +185,31 @@ async def create_pipeline(
     return pipeline
 
 
+@router.get("/projects/{project_id}/pipelines", response_model=list[PipelineResponse])
+async def list_pipelines(
+    project_id: UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> list[Pipeline]:
+    """查询项目 Pipeline，供控制台总览和 Studio 选择器使用。"""
+    await require_project_role(
+        project_id,
+        current_user,
+        session,
+        {
+            ProjectRole.MAKER,
+            ProjectRole.CHECKER_1,
+            ProjectRole.CHECKER_2,
+            ProjectRole.OPERATOR,
+            ProjectRole.AUDITOR,
+        },
+    )
+    result = await session.scalars(
+        select(Pipeline).where(Pipeline.project_id == project_id).order_by(Pipeline.created_at)
+    )
+    return list(result.all())
+
+
 @router.post(
     "/pipelines/{pipeline_id}/versions",
     response_model=PipelineVersionResponse,
@@ -217,6 +242,22 @@ async def create_pipeline_version(
     await session.commit()
     await session.refresh(version)
     return version
+
+
+@router.get("/pipelines/{pipeline_id}/versions", response_model=list[PipelineVersionResponse])
+async def list_pipeline_versions(
+    pipeline_id: UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> list[PipelineVersion]:
+    """查询 Pipeline 的不可变版本和草稿状态，避免前端直接访问数据库。"""
+    pipeline = await _get_pipeline_for_user(pipeline_id, current_user, session)
+    result = await session.scalars(
+        select(PipelineVersion)
+        .where(PipelineVersion.pipeline_id == pipeline.id)
+        .order_by(PipelineVersion.version_number.desc())
+    )
+    return list(result.all())
 
 
 @router.post("/versions/{version_id}/generation", response_model=AgentRunResponse)

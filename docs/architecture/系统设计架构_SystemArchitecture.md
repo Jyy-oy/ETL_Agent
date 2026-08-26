@@ -10,7 +10,7 @@
 2. LLM 只生成候选和澄清文本，权限、预算、审批和副作用由确定性代码控制。
 3. 所有外部副作用都经过 Prepare/Approve/Commit、Capability、Tool Broker 和 Outbox。
 4. 对话、工作流、执行三种状态持久化隔离，并可跨请求恢复。
-5. MVP 能先实现一条 MySQL → Doris 链路，同时不把连接器、Provider、策略和执行引擎写死。
+5. MVP 先实现一条合成 MySQL → VM Doris 真实链路，同时不把连接器、Provider、策略和执行引擎写死。
 
 ## 2. 逻辑分层
 

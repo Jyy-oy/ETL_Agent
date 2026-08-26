@@ -153,6 +153,7 @@ Prepare 不产生外部副作用；Approve 只针对冻结事实；Commit 必须
 - 截至 2026-08-25，VM 已通过 Docker Compose 启动 PostgreSQL 16、Redis、MinIO、Vault 和 SeaTunnel 2.3.10，核心基础设施均处于运行状态；SeaTunnel 使用不传 `-r` 的单节点默认 `MASTER_AND_WORKER` 角色，Windows 到 VM 的 TCP/协议级依赖检查已通过。
 - LLM 调用远端百炼平台，不在本地或服务器部署模型。
 - 首期 Compose 仅负责基础设施；FastAPI、Celery、Vue 应用服务需在源码实现后再加入。
+- 本项目为学习和工程演练项目，M4/M5 首期使用合成 MySQL 数据、SeaTunnel FakeSource 和 Mock Doris 目标动作完成验收，不要求真实业务 MySQL/Doris；真实连接器和生产链路作为后续可选扩展。
 
 部署和开发操作见：
 

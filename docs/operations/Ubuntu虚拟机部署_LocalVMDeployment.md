@@ -1,6 +1,6 @@
 # Ubuntu 虚拟机部署手册
 
-本文针对 Ubuntu 虚拟机 `192.168.181.128`，部署 ETL-Agent 首期基础设施。当前 Compose 仍不启动 FastAPI、Celery 或 Vue 应用容器；控制面 API 和 M5.1 Worker 代码已存在，待应用镜像、运行用户和生产级密钥配置确认后再加入 Compose。
+本文针对 Ubuntu 虚拟机 `192.168.181.128`，部署 ETL-Agent 首期基础设施。当前 Compose 仍不启动 FastAPI、Celery 或 Vue 应用容器；控制面 API 和 M5.2 Worker/质量监督代码已存在，待应用镜像、运行用户和生产级密钥配置确认后再加入 Compose。
 
 ## 1. 目标拓扑
 
@@ -108,6 +108,15 @@ docker compose --profile data-plane logs -f seatunnel
 ```
 
 当前 Compose 使用单节点 `master_and_worker` 角色，启动时不传 `-r` 参数即可使用 SeaTunnel 2.3.10 的默认角色。该版本显式传入 `master_and_worker` 会被 Java 引擎拒绝；多节点部署时才分别使用 `-r master` 和 `-r worker`。如果镜像版本的启动脚本路径、角色参数或端口不同，应只修改 Compose 的 `seatunnel` 服务和本文件，不要改变控制面与数据面的边界。SeaTunnel 需要独立的作业配置和插件目录，业务连接凭据仍由 Vault/SecretProvider 注入。
+
+SeaTunnel 2.3.10 默认关闭 Hazelcast REST API，日志会出现 `REST API is not enabled`。Compose 已通过 `HZ_NETWORK_RESTAPI_ENABLED=true` 开启该开关，并把宿主 `5802` 映射到容器 REST 端口 `8080`；修改后需执行 `docker compose --profile data-plane up -d --force-recreate seatunnel`，再确认日志包含 `SeaTunnel REST service will start on port 8080`。可用以下命令验证 REST 服务：
+
+```bash
+curl -fsS http://127.0.0.1:5802/running-jobs
+curl -fsS http://127.0.0.1:5802/finished-jobs
+```
+
+SeaTunnel 2.3.10 的已验证契约是：提交 `POST /submit-job?format=hocon`，请求体为 `text/plain` HOCON；状态 `GET /job-info/{job_id}`，响应状态字段为 `jobStatus`、作业 ID 字段为 `jobId`；取消 `POST /stop-job`，JSON 请求体为 `{"jobId":"<id>"}`。这些差异由 `SeaTunnelAdapter` 统一转换，路径仍通过 `.env` 的 `SEATUNNEL_*_PATH` 配置。清理、Swap 和回滚不是 SeaTunnel 2.3.10 原生动作，仍需由 MySQL/Doris 目标适配器提供。
 
 ## 6. 启动 MySQL/Doris 合成数据面（可选）
 

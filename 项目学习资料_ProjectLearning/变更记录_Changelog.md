@@ -1,5 +1,148 @@
 # ETL-Agent 学习资料与工程沉淀变更记录
 
+## 2026-08-26：真实数据面单表 Profile 使用提示和执行错误详情
+
+- 根因：Doris 最近 Profile 同时包含 `orders_current`、`orders_current__smoke` 两张表，真实运行编译器按首期约束拒绝多表目标 Profile，ExecutionRun 记录为 `OUTBOX_DISPATCH_FAILED`。
+- 处理：连接与 Profile 页面增加表名范围输入，支持重新探查指定单表；运行中心显示稳定中文错误码和后端脱敏错误详情。
+- 边界：该错误发生在 SeaTunnel 提交前，不会创建外部作业或修改目标表；修复后需生成新 PipelineVersion 并重新 Prepare/审批/Commit。
+- 验证：前端 TypeScript 检查和生产构建通过；API 健康检查、Worker/Beat 运行状态正常。
+
+## 2026-08-26：项目总览补充项目编码展示
+
+- 内容：项目选择器显示“项目名称（项目编码）”；总览标题下增加当前项目名称和编码，解决创建项目后难以确认项目编码的问题。
+- 验证：前端 TypeScript 检查和生产构建通过。
+
+## 2026-08-26：开发环境注册页支持直接绑定 Checker
+
+- 内容：注册页增加项目编码和 Checker 1/2 选择；注册成功后自动建立项目成员关系和对应职责槽，便于直接演示 Prepare/四眼审批。
+- 边界：仅在 `APP_ENV=development` 开放；普通账号注册保持兼容；项目编码必须已存在，已占用的 Checker 槽会返回稳定中文错误。
+- 使用：先由 Maker 创建项目，退出后在注册页选择 Checker 职责并填写项目编码；建议 Checker 1、Checker 2 使用两个不同账号。
+- 验证：新增注册请求模型回归测试，前端构建、Ruff 和 Mypy 检查通过。
+
+## 2026-08-26：M6.1 Benchmark 历史摘要持久化
+
+- 内容：新增 `benchmark_runs` 表和 `0011_benchmark_runs` 迁移；Benchmark POST 在返回报告的同时保存固定参数、数据摘要、制品摘要、策略版本、环境和统计指标。
+- API：新增项目级最近历史查询 `GET /api/v1/projects/{project_id}/benchmarks` 和单条报告查询 `GET /api/v1/benchmarks/{benchmark_id}`，均执行项目成员权限校验。
+- 前端：Benchmark 页面增加历史报告列表，刷新项目数据时自动加载最近 20 条，选中历史记录可恢复报告摘要。
+- 边界：只保存脱敏统计摘要，不保存业务样本；MinIO 详细报告归档、实时推送、真实 L2 Benchmark 和企业 SSO 仍是后续扩展。
+- 验证：迁移升级成功；Benchmark POST/项目历史/单条查询真实 API 联调通过；56 项非集成测试通过、2 项显式跳过；Ruff、Mypy、Alembic check、`uv lock --check` 和前端构建通过。
+
+## 2026-08-26：M5.5 真实合成 MySQL → Doris 联调修复
+
+- 根因：VM Doris 开发账号使用空密码，连接测试适配器用 `if not password` 把合法空密码当成缺少凭据，导致 Doris 连接测试和 Profile 探查返回 `SECRET_UNAVAILABLE`。
+- 修复：仅在 Secret 缺少 `password` 字段（`None`）时拒绝；保留运行时不把密码写入 PostgreSQL、日志和 API 响应的边界。
+- 验证：新增空密码回归测试，随后重新执行 VM Doris 连接测试、Profile 和真实 SeaTunnel 数据面联调。
+
+## 2026-08-26：Windows LangGraph Checkpoint 事件循环启动修复
+
+- 根因：新版 Uvicorn 在 Windows 默认使用 `ProactorEventLoop`，覆盖了应用导入阶段设置的事件循环策略，导致 LangGraph psycopg 异步 Checkpoint 抛出 `InterfaceError`。
+- 修复：增加 `selector_event_loop_factory`，启动 API 时通过 Uvicorn `--loop` 显式使用 `SelectorEventLoop`，并同步开发手册命令。
+- 验证：使用该启动方式重新执行 PostgreSQL Checkpoint setup 和生成工作流。
+
+## 2026-08-26：Prepare 审批槽外键事务顺序修复
+
+- 根因：Preparation 与 ApprovalRequest 没有 ORM 关系映射，SQLAlchemy flush 时可能先插入审批槽，导致 `preparation_id` 外键约束失败并返回 500。
+- 修复：加入审批槽前显式 flush Preparation；仍在同一个 PostgreSQL 事务中提交，失败会整体回滚。
+- 验证：重新调用 Prepare，确认返回审批槽并继续 Checker/Operator/Worker 联调。
+
+## 2026-08-26：Beat Outbox 发布后监督任务补投
+
+- 根因：Celery Beat 的批量 Outbox 路径成功提交 SeaTunnel 后没有投递 `supervise_execution_run_task`，ExecutionRun 会永久保持 `running`。
+- 修复：批量 Broker 收到引擎作业 ID 后记录执行 ID，在本轮 Outbox 消费结束后安排独立监督任务；单事件消费路径保持原有行为。
+- 验证：当前真实 SeaTunnel 作业补触发监督后，确认质量报告、Doris 影子表和原子 Swap 状态。
+
+## 2026-08-26：Doris 原子 Swap 语法兼容修复
+
+- 根因：Doris 2.1 `ALTER TABLE ... REPLACE WITH` 语法要求在影子表前显式写 `TABLE`，旧 SQL 缺少关键字，导致质量通过后的发布动作失败。
+- 修复：原子 Swap 和回滚统一生成 `REPLACE WITH TABLE` 语句，并更新 SQL 回归测试。
+- 验证：使用新的 Preparation/Capability 重跑真实 SeaTunnel → Doris 影子表 → 原子 Swap。
+
+## 2026-08-26：重复监督不覆盖已发布状态
+
+- 根因：单事件消费路径和 Beat 批量路径都可能投递一次监督任务，第二次监督在 Swap 已发布后重新写入 `swap_requested`，造成执行状态与发布状态不一致。
+- 修复：质量通过时仅在发布状态不是 `published` 时写入 `swap_requested`，已发布事实保持不可回退。
+- 验证：真实 Doris 目标表已完成原子切换，重复监督后发布状态保持 `published`。
+
+## 2026-08-26：回滚后的清理状态保持单调
+
+- 根因：回滚动作完成后将发布状态设为 `cleaned`，迟到的重复监督仍按质量通过逻辑写回 `swap_requested`。
+- 修复：质量通过的重复监督同时保护 `published` 和 `cleaned` 两类已完成状态。
+- 验证：重新执行真实发布和回滚，确认回滚终态为 `rollback=completed`、`publish=cleaned`。
+
+## 2026-08-26：修复子目录启动导致 PostgreSQL 回退 localhost
+
+- 级别：缺陷修复
+- 类型：配置/测试/文档
+- 来源：重启 FastAPI 后登录返回 HTTP 500
+- 根因与解决过程：从 `src/etl_agent` 子目录启动时，Pydantic Settings 按当前目录寻找 `.env`，未加载项目根配置，数据库连接退回默认 `localhost:5432`，登录查询用户时被拒绝。配置现在优先按 `config.py` 所在源码位置解析项目根 `.env`，并保留部署目录 `.env` 回退路径。
+- 验证证据：在 `src/etl_agent` 目录执行 `uv run python` 时解析到 PostgreSQL `192.168.181.128:5432`、Vault `192.168.181.128:8200` 和 MinIO `192.168.181.128:9000`；配置/API 测试通过，Ruff 和 Mypy 通过。
+- 涉及文件：`src/etl_agent/config.py`、`tests/unit/test_config.py`、`docs/development/开发环境与依赖_DevelopmentEnvironment.md`、`项目学习资料_ProjectLearning/故障排查手册_TroubleshootingGuide.md`
+
+## 2026-08-26：修复 MySQL Profile 元数据键大小写兼容问题
+
+- 级别：缺陷修复
+- 类型：修复/测试/排障文档
+- 来源：VM 合成 MySQL Profile 探查失败
+- 根因与解决过程：连接测试只执行 `SELECT 1` 可以通过，但 MySQL `information_schema` 查询返回大写列名，Profile 代码按小写键读取并触发 `KeyError('table_schema')`。新增大小写不敏感的元数据字段读取，补充回归测试和排障说明；前端对仍指向 `127.0.0.1` 的旧 MySQL 连接给出 VM 地址修正提示。
+- 验证证据：VM 连接 `192.168.181.128` 成功识别 `demo_orders`，读取 1 张表和样本；MySQL 精确行数为 10,000；M2.2 单元测试 6 项通过，Ruff、Mypy 和格式检查通过。
+- 涉及文件：`src/etl_agent/infrastructure/profiling.py`、`tests/unit/test_m2_2.py`、`frontend/src/App.vue`、`项目学习资料_ProjectLearning/故障排查手册_TroubleshootingGuide.md`、`项目学习资料_ProjectLearning/开发问答笔记_LearningNotes.md`
+
+## 2026-08-26：Profile 选择防误填和合成订单数据初始化
+
+- 级别：开发体验增强/学习数据
+- 类型：修复/增强
+- 来源：Pipeline Studio 使用反馈
+- 根因与解决过程：页面原先允许把 `1`、`2` 等示例数字直接提交为 Profile ID，后端按 UUID 校验后返回英文错误。现在源/目标 Profile 改为已读取 Profile 下拉选择，未加载 Profile 时生成和 Prepare 按钮禁用，并补充 UUID 和字段校验中文提示；同时在 VM 合成 MySQL 中初始化 `demo_orders` 10,000 行确定性订单数据。
+- 验证证据：前端 `npm run build` 通过；MySQL `demo_orders` 行数为 10,000，主键范围 1-10,000；Ruff、Mypy 和格式检查通过。
+- 涉及文件：`frontend/src/App.vue`、`docs/development/项目使用手册_ProjectUserGuide.md`、`docs/development/项目测试手册_ProjectTestingGuide.md`
+
+## 2026-08-26：项目使用手册和百炼验证步骤补齐
+
+- 级别：开发体验增强
+- 类型：文档
+- 来源：项目实际使用与百炼配置确认
+- 内容：新增《项目使用手册》，覆盖 VM/Windows 启动、百炼配置确认、合成 MySQL 数据准备、控制台主流程、连接/Profile、Pipeline 生成、Prepare/Approve/Commit、运行监督、Benchmark 和中文错误提示模拟测试；每个测试用例明确验证的功能和预期结果。
+- 边界：当前 `.env` 已配置百炼兼容地址、模型和非空 API Key，但真实烟测开关仍默认关闭；文档提供仅发送虚拟 Profile 的显式烟测命令。
+- 涉及文件：`docs/development/项目使用手册_ProjectUserGuide.md`、`docs/README.md`
+
+## 2026-08-26：连接编辑与 VM 地址修正流程补齐
+
+- 级别：开发体验增强
+- 类型：修复/增强
+- 来源：连接与 Profile 页面实测反馈
+- 根因与解决过程：旧连接可能仍保存 `127.0.0.1`，而 Windows/PyCharm 访问的是 Ubuntu VM；同时已有连接无法在页面内修正。前端默认合成 MySQL 地址使用 `192.168.181.128`，新增“编辑/保存/取消”流程和中文提示；后端新增 `PUT /api/v1/connections/{connection_id}`，仍只允许更新非敏感字段并保留 SecretRef 约束。
+- 验证证据：VM 上的 MySQL、Vault 凭据和连接测试已通过；前端构建、51 项非集成测试、Ruff、Mypy、Alembic check 和 `uv lock --check` 通过。
+- 涉及文件：`frontend/src/App.vue`、`src/etl_agent/api/connection_models.py`、`src/etl_agent/api/connections.py`、`tests/unit/test_api.py`、`docs/development/项目测试手册_ProjectTestingGuide.md`
+
+## 2026-08-26：控制台中文错误提示与首轮测试手册补齐
+
+- 级别：开发体验增强
+- 类型：修复/文档
+- 来源：M6 前端首次使用反馈
+- 根因与解决过程：注册参数校验、网络不可达、权限错误和状态枚举此前部分直接显示英文或底层编码，且新用户注册后缺少项目初始化入口；前端现在统一转换为中文提示，并在无项目时提供“创建学习项目”入口。新增《项目测试手册》，明确自动化、集成、浏览器、API 冒烟和合成数据面验收步骤。
+- 验证证据：`npm run build` 通过；全量非集成 pytest 51 项通过；Ruff、Mypy 和格式检查通过。
+- 涉及文件：`frontend/src/App.vue`、`docs/development/项目测试手册_ProjectTestingGuide.md`、`docs/development/首期开发手册_DevelopmentHandbook.md`、`docs/README.md`
+
+## 2026-08-26：M6 Vue 控制台与可重复 Benchmark 完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 6 前端与 Benchmark
+- 根因与解决过程：新增 Vue 3 + Vite + TypeScript 控制台，覆盖项目总览、连接/Profile、Pipeline Studio、四眼审批、运行中心和 Benchmark；新增项目级 Pipeline/Version、Preparation、ExecutionRun 列表 API，避免前端绕过控制面读取数据库。新增确定性 L0 基线、L1 故障注入 Benchmark API 与 CLI，固定数据规模、随机种子、制品摘要、策略版本和环境即可复现实验结果。
+- 验证证据：前端 `npm run build` 通过；M6 Benchmark/路由测试通过；全量非集成 pytest 51 项通过、2 项显式跳过；Ruff、Mypy 和格式检查通过。
+- 学习项目边界：Benchmark 使用合成统计，不访问真实 MySQL/Doris，不保存业务样本；历史报告持久化、真实 L2 链路、实时推送和企业 SSO 留待后续扩展。
+- 涉及文件：`frontend/`、`src/etl_agent/benchmark.py`、`src/etl_agent/api/benchmarks.py`、`src/etl_agent/api/generation.py`、`src/etl_agent/api/preparations.py`、`scripts/run_benchmark.py`、`tests/unit/test_m6_benchmark.py`
+
+## 2026-08-26：M5.2 质量监督和 SeaTunnel 2.3.10 REST 契约校准完成
+
+- 级别：开发实现/联调修复
+- 类型：增强
+- 来源：阶段 4、阶段 5 收尾
+- 根因与解决过程：补齐 `ExecutionRun` 质量、发布、清理和回滚状态，运行监督快照、QualityContract/RuntimeBudget 判定、取消/清理/Swap/回滚 Outbox 动作和查询 API；SeaTunnel Adapter 现在按 2.3.10 实际契约发送 `text/plain` HOCON，读取 `jobStatus`/`jobId` 和原生计数/字节指标，并将其转换为控制面稳定字段。取消请求改为 `POST /stop-job` + JSON `jobId`，VM Compose 将宿主 `5802` 正确映射到容器 REST `8080` 并开启 Hazelcast REST API。
+- 验证证据：VM FakeSource → Console 作业提交返回作业 ID，`/job-info/{id}` 返回 `FINISHED` 和指标，`/stop-job` 接受 JSON 请求；Windows 访问 `http://192.168.181.128:5802/running-jobs` 返回 200。全量 pytest 49 项通过、2 项集成测试默认跳过；Ruff、Mypy、Alembic check、`uv lock --check` 和 `git diff --check` 通过。
+- 学习项目边界：首期用合成 MySQL 数据、SeaTunnel FakeSource/Mock 目标动作验收清理、Swap、回滚和质量分流，不要求真实 MySQL/Doris。真实目标库适配、大数据量生产压测、真实百炼调用、前端和 Benchmark 属于后续可选扩展。
+- 涉及文件：`src/etl_agent/workers/engine.py`、`src/etl_agent/workers/quality.py`、`src/etl_agent/workers/supervision.py`、`src/etl_agent/workers/tasks.py`、`migrations/versions/0010_quality_supervision.py`、`.env.example`、`docker-compose.yml`、`docs/operations/Ubuntu虚拟机部署_LocalVMDeployment.md`
+
 ## 2026-08-26：M5.1 Celery/Outbox/SeaTunnel Adapter 边界完成
 
 - 级别：开发实现

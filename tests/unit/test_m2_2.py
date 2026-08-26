@@ -7,9 +7,9 @@ import pytest
 
 from etl_agent.api.connection_models import ProfileResponse
 from etl_agent.config import Settings
-from etl_agent.infrastructure.connection_testing import run_connection_test
+from etl_agent.infrastructure.connection_testing import _connection_parameters, run_connection_test
 from etl_agent.infrastructure.models import Connection, MetadataProfile, ProfileStatus
-from etl_agent.infrastructure.profiling import _build_profile_sync
+from etl_agent.infrastructure.profiling import _build_profile_sync, _metadata_value
 from etl_agent.infrastructure.secrets import (
     SecretProviderError,
     normalize_vault_path,
@@ -110,6 +110,17 @@ def test_normalize_vault_path_applies_prefix_and_rejects_traversal() -> None:
         normalize_vault_path("../password", "etl-agent", "secret")
 
 
+def test_empty_password_is_allowed_for_local_doris() -> None:
+    """验证本地 Doris 空密码账号不会被误判为缺少凭据。"""
+    parameters = _connection_parameters(
+        _connection("doris"),
+        {"username": "root", "password": ""},
+        5,
+    )
+
+    assert parameters["password"] == ""
+
+
 @pytest.mark.asyncio
 async def test_mysql_connection_probe_returns_passed(monkeypatch: pytest.MonkeyPatch) -> None:
     """验证 MySQL 兼容连接执行 SELECT 1 后返回通过。"""
@@ -145,6 +156,11 @@ def test_profile_redacts_samples_and_calculates_fingerprint() -> None:
     assert result.redacted_sample["app.users"][0]["email"] == "[REDACTED]"
     assert result.redacted_sample["app.users"][0]["name"] == "Alice"
     assert len(result.fingerprint) == 64
+
+
+def test_metadata_value_accepts_uppercase_information_schema_keys() -> None:
+    """验证 MySQL 驱动返回大写 information_schema 列名时仍能读取元数据。"""
+    assert _metadata_value({"TABLE_SCHEMA": "etl_demo"}, "table_schema") == "etl_demo"
 
 
 def test_profile_response_serializes_schema_json_alias() -> None:

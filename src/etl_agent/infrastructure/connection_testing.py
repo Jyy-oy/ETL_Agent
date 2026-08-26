@@ -28,7 +28,8 @@ def _connection_parameters(
 ) -> dict[str, Any]:
     """合并连接登记信息和运行时凭据，生成 PyMySQL 连接参数。"""
     password = credentials.get("password")
-    if not password:
+    # 空字符串密码在本地 Doris 开发账号中是合法凭据；只有缺少字段才算不完整。
+    if password is None:
         raise SecretProviderError("Secret 缺少 password")
     return {
         "host": connection.host,

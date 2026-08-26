@@ -13,7 +13,12 @@ from etl_agent.api.auth_dependencies import (
     require_project_membership,
     require_project_role,
 )
-from etl_agent.api.connection_models import ConnectionCreate, ConnectionResponse, ProfileResponse
+from etl_agent.api.connection_models import (
+    ConnectionCreate,
+    ConnectionResponse,
+    ConnectionUpdate,
+    ProfileResponse,
+)
 from etl_agent.api.connection_test_models import ConnectionTestResponse, ProfileCreateRequest
 from etl_agent.api.errors import ApiError
 from etl_agent.infrastructure.connection_testing import run_connection_test
@@ -59,6 +64,32 @@ async def create_connection(
     )
     connection = Connection(**payload.model_dump())
     session.add(connection)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ApiError("CONNECTION_CODE_EXISTS", "项目内连接编码已存在", status_code=409) from exc
+    await session.refresh(connection)
+    return connection
+
+
+@router.put("/connections/{connection_id}", response_model=ConnectionResponse)
+async def update_connection(
+    connection_id: UUID,
+    payload: ConnectionUpdate,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> Connection:
+    """更新连接地址、类型或 SecretRef，确保仍处于项目职责和唯一编码约束内。"""
+    connection = await _get_connection_for_user(connection_id, current_user, session)
+    await require_project_role(
+        connection.project_id,
+        current_user,
+        session,
+        {ProjectRole.MAKER, ProjectRole.OPERATOR},
+    )
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(connection, field, value)
     try:
         await session.commit()
     except IntegrityError as exc:

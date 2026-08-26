@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from etl_agent.api.auth import router as auth_router
+from etl_agent.api.benchmarks import router as benchmarks_router
 from etl_agent.api.connections import router as connections_router
 from etl_agent.api.errors import (
     ApiError,
@@ -56,6 +57,7 @@ def create_app(
     app.add_exception_handler(Exception, unhandled_error_handler)
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(benchmarks_router)
     app.include_router(connections_router)
     app.include_router(file_assets_router)
     app.include_router(generation_router)

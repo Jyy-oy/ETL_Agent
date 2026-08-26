@@ -26,3 +26,9 @@
 ### 2026-08-25：为什么普通镜像源不一定让 SeaTunnel 更快？
 
 结论：SeaTunnel 镜像约 3 GB，镜像源可能没有缓存大 Layer，需要回源；也可能是 VM 网络或磁盘 I/O 瓶颈。先检查 DNS、带宽、磁盘和镜像源可达性，不要盲目增加不明来源镜像。
+
+### 2026-08-26：为什么 MySQL 连接测试通过但 Profile 探查失败？
+
+结论：连接测试只执行 `SELECT 1`，而 Profile 还会读取 `information_schema.columns` 和 `information_schema.tables`。本次 VM MySQL 的驱动返回大写元数据键（`TABLE_SCHEMA`、`TABLE_NAME`、`TABLE_ROWS`），旧代码按小写键读取导致 `KeyError('table_schema')`，最终页面只显示“只读 Profile 探查失败”。现已增加大小写兼容读取并补回归测试。
+
+证据：修复前同一 VM 连接复现 `ProfileError`，根因为 `KeyError('table_schema')`；修复后识别 `demo_orders` 1 张表并读取样本，MySQL 精确行数为 10,000。

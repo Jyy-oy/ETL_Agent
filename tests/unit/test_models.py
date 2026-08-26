@@ -9,4 +9,5 @@ def test_m1_identity_tables_are_registered() -> None:
         "project_memberships",
         "project_role_grants",
         "file_assets",
+        "benchmark_runs",
     } <= set(Base.metadata.tables)

@@ -101,6 +101,33 @@ class ExecutionRunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class QualityStatus(StrEnum):
+    """执行结果的质量分流状态。"""
+
+    PENDING = "pending"
+    PASSED = "passed"
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+
+class PublishStatus(StrEnum):
+    """影子表到正式表的发布状态。"""
+
+    NOT_STARTED = "not_started"
+    SWAP_REQUESTED = "swap_requested"
+    PUBLISHED = "published"
+    CLEANED = "cleaned"
+
+
+class RollbackStatus(StrEnum):
+    """受管回滚的生命周期状态。"""
+
+    NOT_REQUESTED = "not_requested"
+    REQUESTED = "requested"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class OutboxEventStatus(StrEnum):
     """Transactional Outbox 事件的投递状态。"""
 
@@ -422,6 +449,17 @@ class ExecutionRun(TimestampMixin, Base):
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    quality_status: Mapped[str] = mapped_column(
+        String(32), default=QualityStatus.PENDING, nullable=False
+    )
+    publish_status: Mapped[str] = mapped_column(
+        String(32), default=PublishStatus.NOT_STARTED, nullable=False
+    )
+    rollback_status: Mapped[str] = mapped_column(
+        String(32), default=RollbackStatus.NOT_REQUESTED, nullable=False
+    )
+    shadow_table: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    error_table: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
 
 class OutboxEvent(TimestampMixin, Base):
@@ -482,3 +520,82 @@ class EvidenceLedgerEvent(TimestampMixin, Base):
     payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     prev_event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class RuntimeSupervisionSnapshot(TimestampMixin, Base):
+    """按运行保存预算、引擎状态和质量指标快照。"""
+
+    __tablename__ = "runtime_supervision_snapshots"
+    __table_args__ = (
+        Index("ix_runtime_snapshots_execution_created", "execution_run_id", "created_at"),
+        Index("ix_runtime_snapshots_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_run_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("execution_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    engine_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    observed_metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    exceeded_budget_fields: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class ExecutionQualityResult(TimestampMixin, Base):
+    """保存一次执行最终质量报告和影子/错误表引用。"""
+
+    __tablename__ = "execution_quality_results"
+    __table_args__ = (
+        UniqueConstraint("execution_run_id", name="uq_quality_execution_run"),
+        Index("ix_quality_results_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_run_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("execution_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_records: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    output_records: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    rejected_records: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    rejection_rate: Mapped[float] = mapped_column(nullable=False)
+    report_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    shadow_table: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    error_table: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+
+class BenchmarkRun(TimestampMixin, Base):
+    """保存 Benchmark 的可追踪运行事实，但不保存任何业务样本。"""
+
+    __tablename__ = "benchmark_runs"
+    __table_args__ = (
+        Index("ix_benchmark_runs_project_created", "project_id", "created_at"),
+        Index("ix_benchmark_runs_project_level_created", "project_id", "level", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    level: Mapped[str] = mapped_column(String(8), nullable=False)
+    dataset_rows: Mapped[int] = mapped_column(nullable=False)
+    repeat: Mapped[int] = mapped_column(nullable=False)
+    seed: Mapped[int] = mapped_column(nullable=False)
+    dataset_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_digest: Mapped[str] = mapped_column(String(128), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

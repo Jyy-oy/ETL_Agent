@@ -15,11 +15,15 @@ from etl_agent.api.preparation_models import (
     ApprovalDecisionRequest,
     ApprovalRequestResponse,
     CommitResponse,
+    ExecutionActionRequest,
+    ExecutionQualityResultResponse,
     ExecutionRunResponse,
     PreparationCreate,
     PreparationResponse,
+    RuntimeSupervisionSnapshotResponse,
 )
 from etl_agent.domain.generation import RuntimeBudget, cap_runtime_budget
+from etl_agent.harness.actions import issue_execution_action_capability
 from etl_agent.harness.capability import (
     CapabilityClaims,
     CapabilityError,
@@ -41,6 +45,7 @@ from etl_agent.harness.pdp import decide_policy
 from etl_agent.infrastructure.models import (
     ApprovalRequest,
     Connection,
+    ExecutionQualityResult,
     ExecutionRun,
     ExecutionRunStatus,
     MetadataProfile,
@@ -51,6 +56,8 @@ from etl_agent.infrastructure.models import (
     PipelineVersionStatus,
     Preparation,
     ProjectRole,
+    RollbackStatus,
+    RuntimeSupervisionSnapshot,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["harness"])
@@ -134,6 +141,11 @@ def _execution_response(execution: ExecutionRun) -> ExecutionRunResponse:
         metrics=dict(execution.metrics_json),
         error_code=execution.error_code,
         error_detail=execution.error_detail,
+        quality_status=execution.quality_status,
+        publish_status=execution.publish_status,
+        rollback_status=execution.rollback_status,
+        shadow_table=execution.shadow_table,
+        error_table=execution.error_table,
         created_at=execution.created_at,
         updated_at=execution.updated_at,
     )
@@ -250,6 +262,8 @@ async def prepare_version(
         expires_at=now + timedelta(seconds=ttl_seconds),
     )
     session.add(preparation)
+    # 先把父表 Preparation 刷入当前事务，确保无 ORM 关系映射时审批槽外键可用。
+    await session.flush()
     approvals = [
         ApprovalRequest(
             id=uuid4(),
@@ -263,6 +277,41 @@ async def prepare_version(
     await session.commit()
     await session.refresh(preparation)
     return _preparation_response(preparation, approvals)
+
+
+@router.get("/projects/{project_id}/preparations", response_model=list[PreparationResponse])
+async def list_preparations(
+    project_id: UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> list[PreparationResponse]:
+    """查询项目 Preparation 及审批槽，供审批工作台展示冻结事实。"""
+    await require_project_role(
+        project_id,
+        current_user,
+        session,
+        {
+            ProjectRole.MAKER,
+            ProjectRole.CHECKER_1,
+            ProjectRole.CHECKER_2,
+            ProjectRole.OPERATOR,
+            ProjectRole.AUDITOR,
+        },
+    )
+    preparations = await session.scalars(
+        select(Preparation)
+        .where(Preparation.project_id == project_id)
+        .order_by(Preparation.created_at.desc())
+    )
+    rows: list[PreparationResponse] = []
+    for preparation in preparations:
+        approvals = await session.scalars(
+            select(ApprovalRequest)
+            .where(ApprovalRequest.preparation_id == preparation.id)
+            .order_by(ApprovalRequest.created_at)
+        )
+        rows.append(_preparation_response(preparation, list(approvals.all())))
+    return rows
 
 
 @router.post(
@@ -626,3 +675,309 @@ async def get_execution_run(
         },
     )
     return _execution_response(execution)
+
+
+@router.get("/projects/{project_id}/execution-runs", response_model=list[ExecutionRunResponse])
+async def list_execution_runs(
+    project_id: UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> list[ExecutionRunResponse]:
+    """查询项目执行事实，供运行中心按最新提交时间展示。"""
+    await require_project_role(
+        project_id,
+        current_user,
+        session,
+        {
+            ProjectRole.MAKER,
+            ProjectRole.CHECKER_1,
+            ProjectRole.CHECKER_2,
+            ProjectRole.OPERATOR,
+            ProjectRole.AUDITOR,
+        },
+    )
+    executions = await session.scalars(
+        select(ExecutionRun)
+        .where(ExecutionRun.project_id == project_id)
+        .order_by(ExecutionRun.created_at.desc())
+    )
+    return [_execution_response(execution) for execution in executions]
+
+
+async def _queue_execution_action(
+    session,
+    request: Request,
+    execution: ExecutionRun,
+    current_user,
+    *,
+    event_type: str,
+    tool: str,
+    payload: dict[str, object],
+) -> OutboxEvent:
+    """为一个执行动作签发单次 Capability 并写入 Transactional Outbox。"""
+    existing = await session.scalar(
+        select(OutboxEvent)
+        .where(
+            OutboxEvent.aggregate_id == execution.id,
+            OutboxEvent.event_type == event_type,
+            OutboxEvent.status.in_(
+                [
+                    OutboxEventStatus.PENDING.value,
+                    OutboxEventStatus.PUBLISHED.value,
+                ]
+            ),
+        )
+        .order_by(OutboxEvent.created_at.desc())
+    )
+    if existing is not None:
+        return existing
+    failed_existing = await session.scalar(
+        select(OutboxEvent)
+        .where(
+            OutboxEvent.aggregate_id == execution.id,
+            OutboxEvent.event_type == event_type,
+            OutboxEvent.status == OutboxEventStatus.FAILED.value,
+        )
+        .limit(1)
+    )
+    preparation = await session.get(Preparation, execution.preparation_id)
+    if preparation is None:
+        raise ApiError("PREPARATION_NOT_FOUND", "Preparation 不存在", status_code=409)
+    settings = request.app.state.settings
+    try:
+        token = issue_execution_action_capability(
+            private_key_path=settings.capability_private_key_path,
+            subject=current_user.id,
+            tool=tool,
+            environment=str(preparation.facts_json.get("environment", "development")),
+            preparation_id=execution.preparation_id,
+            artifact_digest=execution.artifact_digest,
+            ttl_seconds=settings.capability_ttl_seconds,
+        )
+    except (CapabilityError, AttributeError, TypeError, ValueError) as exc:
+        raise ApiError(
+            "CAPABILITY_ISSUE_FAILED", "无法签发执行动作 Capability", status_code=503
+        ) from exc
+    event = OutboxEvent(
+        id=uuid4(),
+        project_id=execution.project_id,
+        aggregate_type="execution_run",
+        aggregate_id=execution.id,
+        event_type=event_type,
+        deduplication_key=(
+            f"{event_type}:{execution.id}:{uuid4()}"
+            if failed_existing is not None
+            else f"{event_type}:{execution.id}"
+        ),
+        status=OutboxEventStatus.PENDING.value,
+        payload_json={
+            "schema_version": f"{event_type}.v1",
+            "execution_run_id": str(execution.id),
+            "preparation_id": str(execution.preparation_id),
+            "engine_job_id": execution.engine_job_id,
+            **payload,
+        },
+        capability_token=token,
+    )
+    session.add(event)
+    await append_evidence_event(
+        session,
+        project_id=execution.project_id,
+        event_type=event_type,
+        resource_type="execution_run",
+        resource_id=execution.id,
+        actor_id=current_user.id,
+        correlation_id=execution.correlation_id,
+        payload={"reason": payload.get("reason", ""), "event_id": str(event.id)},
+    )
+    await session.flush()
+    return event
+
+
+@router.post(
+    "/execution-runs/{execution_id}/cancel", response_model=ExecutionRunResponse, status_code=202
+)
+async def cancel_execution_run(
+    execution_id: UUID,
+    payload: ExecutionActionRequest,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> ExecutionRunResponse:
+    """登记取消请求，实际引擎调用仍由 Tool Broker 执行。"""
+    execution = await session.scalar(
+        select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update()
+    )
+    if execution is None:
+        raise ApiError("EXECUTION_NOT_FOUND", "ExecutionRun 不存在", status_code=404)
+    await require_project_role(execution.project_id, current_user, session, {ProjectRole.OPERATOR})
+    if execution.status in {
+        ExecutionRunStatus.CANCELLED.value,
+        ExecutionRunStatus.SUCCEEDED.value,
+        ExecutionRunStatus.FAILED.value,
+    }:
+        return _execution_response(execution)
+    execution.status = ExecutionRunStatus.CANCEL_REQUESTED.value
+    await _queue_execution_action(
+        session,
+        request,
+        execution,
+        current_user,
+        event_type="execution.cancel",
+        tool="seatunnel.cancel",
+        payload={"reason": payload.reason},
+    )
+    await session.commit()
+    await session.refresh(execution)
+    return _execution_response(execution)
+
+
+@router.post(
+    "/execution-runs/{execution_id}/rollback", response_model=ExecutionRunResponse, status_code=202
+)
+async def rollback_execution_run(
+    execution_id: UUID,
+    payload: ExecutionActionRequest,
+    request: Request,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> ExecutionRunResponse:
+    """登记影子表清理和目标恢复请求，实际回滚由 Tool Broker 执行。"""
+    execution = await session.scalar(
+        select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update()
+    )
+    if execution is None:
+        raise ApiError("EXECUTION_NOT_FOUND", "ExecutionRun 不存在", status_code=404)
+    await require_project_role(execution.project_id, current_user, session, {ProjectRole.OPERATOR})
+    if execution.rollback_status == RollbackStatus.COMPLETED.value:
+        return _execution_response(execution)
+    if execution.status not in {
+        ExecutionRunStatus.SUCCEEDED.value,
+        ExecutionRunStatus.FAILED.value,
+        ExecutionRunStatus.CANCELLED.value,
+    }:
+        raise ApiError("EXECUTION_NOT_ROLLBACKABLE", "只有终态执行才能回滚", status_code=409)
+    if not execution.engine_job_id:
+        raise ApiError("ENGINE_JOB_ID_MISSING", "执行事实缺少引擎作业 ID", status_code=409)
+    execution.rollback_status = RollbackStatus.REQUESTED.value
+    await _queue_execution_action(
+        session,
+        request,
+        execution,
+        current_user,
+        event_type="execution.rollback",
+        tool="seatunnel.rollback",
+        payload={
+            "reason": payload.reason,
+            "shadow_table": execution.shadow_table,
+            "error_table": execution.error_table,
+            **{
+                key: value
+                for key, value in execution.metrics_json.items()
+                if key
+                in {
+                    "target_connection_id",
+                    "target_host",
+                    "target_port",
+                    "target_secret_ref",
+                    "target_database",
+                    "target_table",
+                }
+            },
+        },
+    )
+    await session.commit()
+    await session.refresh(execution)
+    return _execution_response(execution)
+
+
+@router.get(
+    "/execution-runs/{execution_id}/supervision",
+    response_model=list[RuntimeSupervisionSnapshotResponse],
+)
+async def list_execution_supervision(
+    execution_id: UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> list[RuntimeSupervisionSnapshotResponse]:
+    """查询运行监督快照，供运行中心展示预算和质量变化。"""
+    execution = await session.get(ExecutionRun, execution_id)
+    if execution is None:
+        raise ApiError("EXECUTION_NOT_FOUND", "ExecutionRun 不存在", status_code=404)
+    await require_project_role(
+        execution.project_id,
+        current_user,
+        session,
+        {
+            ProjectRole.MAKER,
+            ProjectRole.CHECKER_1,
+            ProjectRole.CHECKER_2,
+            ProjectRole.OPERATOR,
+            ProjectRole.AUDITOR,
+        },
+    )
+    rows = await session.scalars(
+        select(RuntimeSupervisionSnapshot)
+        .where(RuntimeSupervisionSnapshot.execution_run_id == execution.id)
+        .order_by(RuntimeSupervisionSnapshot.created_at)
+    )
+    return [
+        RuntimeSupervisionSnapshotResponse(
+            id=row.id,
+            execution_run_id=row.execution_run_id,
+            engine_status=row.engine_status,
+            decision=row.decision,
+            observed_metrics=dict(row.observed_metrics),
+            exceeded_budget_fields=list(row.exceeded_budget_fields),
+            detail=row.detail,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.get(
+    "/execution-runs/{execution_id}/quality",
+    response_model=ExecutionQualityResultResponse | None,
+)
+async def get_execution_quality(
+    execution_id: UUID,
+    current_user: CurrentUser,
+    session: DbSession,
+) -> ExecutionQualityResultResponse | None:
+    """查询执行最终质量报告，报告为空表示引擎尚未进入终态。"""
+    execution = await session.get(ExecutionRun, execution_id)
+    if execution is None:
+        raise ApiError("EXECUTION_NOT_FOUND", "ExecutionRun 不存在", status_code=404)
+    await require_project_role(
+        execution.project_id,
+        current_user,
+        session,
+        {
+            ProjectRole.MAKER,
+            ProjectRole.CHECKER_1,
+            ProjectRole.CHECKER_2,
+            ProjectRole.OPERATOR,
+            ProjectRole.AUDITOR,
+        },
+    )
+    result = await session.scalar(
+        select(ExecutionQualityResult).where(
+            ExecutionQualityResult.execution_run_id == execution.id
+        )
+    )
+    if result is None:
+        return None
+    return ExecutionQualityResultResponse(
+        id=result.id,
+        execution_run_id=result.execution_run_id,
+        status=result.status,
+        input_records=result.input_records,
+        output_records=result.output_records,
+        rejected_records=result.rejected_records,
+        rejection_rate=result.rejection_rate,
+        report=dict(result.report_json),
+        shadow_table=result.shadow_table,
+        error_table=result.error_table,
+        created_at=result.created_at,
+    )

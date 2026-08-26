@@ -1,13 +1,17 @@
 """Application configuration loaded from environment variables."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # 优先读取源码项目根目录配置，同时保留部署目录中的相对 .env 作为回退。
+        env_file=(_PROJECT_ROOT_ENV_FILE, ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -31,6 +35,7 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/2"
     celery_task_default_queue: str = "etl-agent"
     celery_worker_concurrency: int = 4
+    outbox_poll_interval_seconds: int = 5
     replay_guard_redis_url: str = "redis://localhost:6379/3"
 
     minio_endpoint: str = "http://localhost:9000"
@@ -60,10 +65,17 @@ class Settings(BaseSettings):
     checkpoint_integration_enabled: bool = False
     preparation_ttl_seconds: int = 300
 
-    seatunnel_zeta_endpoint: str = "http://localhost:5801"
-    seatunnel_submit_path: str = "/submit"
-    seatunnel_status_path: str = "/jobs/{job_id}"
-    seatunnel_cancel_path: str = "/jobs/{job_id}/cancel"
+    seatunnel_zeta_endpoint: str = "http://localhost:5802"
+    real_data_plane_enabled: bool = False
+    seatunnel_mysql_host: str = "mysql"
+    seatunnel_doris_fenodes: str = "doris-fe:8030"
+    seatunnel_submit_path: str = "/submit-job"
+    seatunnel_submit_format: str = "hocon"
+    seatunnel_status_path: str = "/job-info/{job_id}"
+    seatunnel_cancel_path: str = "/stop-job"
+    seatunnel_cleanup_path: str = "/jobs/{job_id}/cleanup"
+    seatunnel_swap_path: str = "/jobs/{job_id}/swap"
+    seatunnel_rollback_path: str = "/jobs/{job_id}/rollback"
     health_check_timeout_seconds: float = 5.0
 
     jwt_secret_key: str = "replace-with-a-random-32-byte-secret"

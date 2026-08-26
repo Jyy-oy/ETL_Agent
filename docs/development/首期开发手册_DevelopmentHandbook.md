@@ -1,6 +1,6 @@
 # ETL-Agent 首期开发手册
 
-本文是首期实现的工作入口。需求细节以 `RequirementsDescription/整理版需求说明_RequirementsSpecification.md` 为准，技术取舍以 `docs/architecture/首期技术选型_InitialTechnicalSelection.md` 为准，VM 操作以 `docs/operations/Ubuntu虚拟机部署_LocalVMDeployment.md` 为准。
+本文是首期实现的工作入口。需求细节以 `RequirementsDescription/整理版需求说明_RequirementsSpecification.md` 为准，技术取舍以 `docs/architecture/首期技术选型_InitialTechnicalSelection.md` 为准，VM 操作以 `docs/operations/Ubuntu虚拟机部署_LocalVMDeployment.md` 为准；逐步测试命令见 [项目测试手册](项目测试手册_ProjectTestingGuide.md)。
 
 ## 1. 开发目标
 
@@ -13,7 +13,7 @@
 → Celery/SeaTunnel → 监督/质量分流 → 审计账本
 ```
 
-不要先做“通用 Agent”或“所有连接器”。先让 MySQL → Doris 的演示链路遵守 Harness 协议，再扩展连接器和前端视图。
+不要先做“通用 Agent”或“所有连接器”。先让合成 MySQL → VM Doris 的真实学习链路遵守 Harness 协议，再扩展真实业务连接器和生产视图。
 
 ## 2. 推荐实施顺序
 
@@ -29,7 +29,7 @@ M1.1/M1.2 已完成：配置加载、请求 ID、统一错误结构、`/health` 
 
 ```bash
 uv run alembic upgrade head
-uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
+uv run uvicorn etl_agent.main:app --loop etl_agent.main:selector_event_loop_factory --host 127.0.0.1 --port 8000
 ```
 
 访问 `GET /health` 可检查 PostgreSQL、Redis、MinIO、Vault、SeaTunnel 和 LLM 配置状态；本阶段不在健康检查中调用真实百炼接口。
@@ -38,7 +38,7 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 - SQLAlchemy/Alembic、租户上下文、用户/项目/成员/角色槽。
 - 结构化日志、请求 ID、配置加载和依赖就绪检查。
 
-本地开发账号使用 `POST /api/v1/auth/register` 注册、`POST /api/v1/auth/login` 登录；注册接口仅在 `APP_ENV=development` 开放。访问项目资源时必须携带 `Authorization: Bearer <access_token>`，项目列表只返回当前用户的有效成员关系。创建项目会建立初始 Maker 和 Operator 槽，Checker 不得与 Maker/Operator 兼任。
+本地开发账号使用 `POST /api/v1/auth/register` 注册、`POST /api/v1/auth/login` 登录；注册接口仅在 `APP_ENV=development` 开放。访问项目资源时必须携带 `Authorization: Bearer <access_token>`，项目列表只返回当前用户的有效成员关系。创建项目会建立初始 Maker 和 Operator 槽，Checker 不得与 Maker/Operator 兼任。为便于学习，注册接口可同时提交已有 `project_code` 和 `project_role`（`checker_1`/`checker_2`），自动建立 Checker 成员关系；生产环境仍应改为管理员或企业身份系统分配。
 
 ### 阶段 2：连接与 Profile
 
@@ -48,7 +48,7 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 - Schema、字段类型、近似统计和脱敏样本的稳定 JSON 契约。
 - MinIO 文件资产元数据和上传大小限制。
 
-调用 `POST /api/v1/connections/{connection_id}/tests` 会解析 Vault `SecretRef` 并执行 MySQL/Doris `SELECT 1`。调用 `POST /api/v1/connections/{connection_id}/profiles` 可传入 `table_names` 和 `sample_rows`，服务端只保存脱敏后的 Profile 快照；不支持的数据库类型会返回稳定错误，不会自动降级为写操作。
+调用 `PUT /api/v1/connections/{connection_id}` 可修正连接主机、端口、数据库和 SecretRef；调用 `POST /api/v1/connections/{connection_id}/tests` 会解析 Vault `SecretRef` 并执行 MySQL/Doris `SELECT 1`。调用 `POST /api/v1/connections/{connection_id}/profiles` 可传入 `table_names` 和 `sample_rows`，服务端只保存脱敏后的 Profile 快照；不支持的数据库类型会返回稳定错误，不会自动降级为写操作。
 
 调用 `POST /api/v1/file-assets` 时使用 multipart 字段 `project_id` 和 `file`。服务端先流式计算大小与 SHA-256，再解析 CSV/JSON/XLSX/Parquet 的有限样本并脱敏，随后把原文件上传到 MinIO，只在 PostgreSQL 保存对象键、摘要和文件 Profile。默认上传上限由 `MAX_UPLOAD_SIZE_BYTES` 控制。
 
@@ -69,7 +69,7 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 
 - M4.1 已完成 PDP v1 风险评级和审批槽分配；`POST /api/v1/versions/{version_id}/prepare` 只冻结通过门禁的不可变版本和 Profile 指纹，不产生外部副作用。
 - M4.2 已完成独立审批槽和 `POST /api/v1/approval-requests/{approval_id}/decisions`；服务端拦截申请人自批、职责不匹配、过期和重复决定，全部 Checker 槽批准后 Preparation 才进入 `approved`。
-- M4.3/M4.4 已完成 Ed25519 Capability 声明/签发/验签、Redis `SET NX EX` Replay Guard、Commit 指纹复核、ExecutionRun、Transactional Outbox 和 Evidence Ledger；`POST /api/v1/preparations/{preparation_id}/commit` 不返回 Capability 原文，重复提交按 Preparation/Idempotency-Key 返回已有执行事实。
+- M4.3/M4.4 已完成 Ed25519 Capability 声明/签发/验签、Redis `SET NX EX` Replay Guard、Commit 指纹复核、ExecutionRun、Transactional Outbox 和 Evidence Ledger；`POST /api/v1/preparations/{preparation_id}/commit` 不返回 Capability 原文，重复提交按 Preparation/Idempotency-Key 返回已有执行事实。取消、清理、原子发布和回滚分别签发独立 Capability，不能复用提交令牌。
 - Prepare 只冻结事实，Approve 只写决定，Commit 重新验指纹。
 - Capability 绑定主体、工具、环境、制品摘要和过期时间；Replay Guard 必须是 Redis 原子消费。
 - Tool Broker 是副作用唯一出口，Outbox 与 ExecutionRun 在一个 PostgreSQL 事务中落库；当前 Outbox 内部字段暂保存 Capability 原文，后续生产化切换 Vault/KMS 信封加密。
@@ -77,17 +77,35 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 
 ### 阶段 5：数据面和监督
 
-- M5.1 已完成 Celery 应用工厂、Outbox Tool Broker、Capability/Replay Guard 消费和 SeaTunnel Adapter 的提交/状态/取消边界；Worker 从 Outbox 读取冻结 PipelineVersion 的 HOCON，不能接收未经 Commit 的直接命令。由于 Capability 在副作用前单次消费，当前不对未知提交结果自动重试，待确认引擎幂等键后再开启。
-- SeaTunnel 2.3.10 的真实 Zeta API 路径仍需在 VM 联调确认，路径通过 `SEATUNNEL_SUBMIT_PATH`、`SEATUNNEL_STATUS_PATH` 和 `SEATUNNEL_CANCEL_PATH` 配置，不应散落在业务用例中。
-- 影子表、错误表、QualityContract 和原子 Swap 分开建模。
-- 运行快照记录行数、字节、时长、放大比、拒绝率和决策；超限时可取消或硬中断。
-- 回滚必须幂等，重复请求不能破坏已恢复状态。
+- M5.1-M5.5 已完成 Celery 应用工厂、Outbox Tool Broker、Capability/Replay Guard 消费和 SeaTunnel Adapter 的提交/状态/取消端口；Worker 从 Outbox 读取冻结 PipelineVersion 的运行时 HOCON，不能接收未经 Commit 的直接命令，并通过 Doris 适配器执行影子表、清理、原子切换和回滚。
+- `supervise_execution_run` 会把引擎状态和指标写入 `runtime_supervision_snapshots`，按冻结 RuntimeBudget 执行行数、字节、时长、放大比和拒绝率硬中断判断；终态按 QualityContract 写入 `execution_quality_results`，通过后自动生成 `execution.swap` Outbox，失败或质量拒绝后自动生成 `execution.cleanup` Outbox。
+- `POST /api/v1/execution-runs/{id}/cancel`、`POST /api/v1/execution-runs/{id}/rollback` 和监督/质量查询接口已提供；动作均走 Outbox，重复请求保持幂等并写入 Evidence Ledger。
+- 已在 VM 用 SeaTunnel 2.3.10 验证 Zeta REST：提交 `POST /submit-job?format=hocon`（`text/plain` HOCON）、状态 `GET /job-info/{job_id}`（`jobStatus`/`jobId`）和取消 `POST /stop-job`（JSON `jobId`）。`SeaTunnelAdapter` 将原生指标转换为 `input_records`、`output_records`、`input_bytes`、`output_bytes`、`rejected_records`、`elapsed_seconds`；路径通过 `SEATUNNEL_*_PATH` 配置，不应散落在业务用例中。Doris 适配器负责影子表准备、失败清理、原子 Swap 和回滚，SeaTunnel 本身不提供这些目标库动作。
+- `scripts/seed_synthetic_mysql.py` 可向 Compose MySQL 写入确定性大批量演示数据；M5.5 已用该数据通过真实 MySQL → SeaTunnel → Doris 链路验收，输入/输出各 10,000 行并验证质量、原子发布和回滚。生产业务连接器、压测和高可用部署属于后续扩展。
 
 ### 阶段 6：前端和 Benchmark
 
-- 先做连接/Profile、Studio、审批、运行中心四条关键路径，再做总览和安全进化大盘。
-- 前端展示脱敏结构和稳定错误码，不展示 Secret 值。
-- L0/L1 Benchmark 在本地可重复；L2 真实链路需隔离数据和权限。
+- M6 已完成 Vue 3 + Vite + TypeScript 控制台首版，入口位于 `frontend/`，覆盖总览、连接/Profile、Pipeline Studio、四眼审批、运行中心和 Benchmark 六个视图。前端只展示脱敏结构、摘要、稳定错误码和运行状态，不保存或展示 Secret 原文。
+- 后端新增项目级 Pipeline/Version、Preparation、ExecutionRun 列表查询，前端不需要绕过 API 读取数据库；所有写动作仍由 JWT、项目职责和 Harness 服务端校验。
+- `POST /api/v1/benchmarks/run` 和 `scripts/run_benchmark.py` 提供离线 L0 基线、L1 故障注入 Benchmark。固定 `dataset_rows`、`seed`、`repeat`、`artifact_digest`、`policy_version` 和 `environment` 后，数据摘要、质量分流、Schema 覆盖率、P0 拦截率和吞吐指标可重复。
+- 启动控制台：
+
+  ```bash
+  # 终端 1：控制面 API
+  uv run uvicorn etl_agent.main:app --loop etl_agent.main:selector_event_loop_factory --host 127.0.0.1 --port 8000
+  # 终端 2：前端控制台
+  cd frontend
+  npm install
+  npm run dev
+  ```
+
+  Vite 默认在 `http://127.0.0.1:5173`，`/api` 和 `/health` 代理到本机 `8000`；也可用 `npm run build` 生成静态产物。运行 Benchmark CLI：
+
+  ```bash
+  uv run python scripts/run_benchmark.py --project-id <项目UUID> --level l1 --rows 10000 --seed 7
+  ```
+
+- M6/M6.1 前端、Benchmark 和历史摘要可离线验收；真实合成数据面需要 VM MySQL/Doris、Vault SecretRef 和 SeaTunnel，真实 LLM 生成还需要非生产百炼 API Key。Benchmark MinIO 报告存档、SSE/WebSocket 实时推送和企业 SSO 属于后续扩展。
 
 ## 3. 关键工程规则
 
@@ -119,7 +137,7 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 | 单元测试 | PDP、职责分离、门禁、摘要、Capability、哈希链、预算判定 | 全部 fake |
 | API 测试 | 鉴权、租户隔离、幂等、错误响应、Prepare/Approve/Commit | FastAPI test client；可 mock Redis/DB |
 | 集成测试 | PostgreSQL 事务/Outbox、Redis Replay Guard、MinIO 对象引用、Vault 读取 | Compose 服务 |
-| 数据面测试 | SeaTunnel 命令、取消、质量分流、Swap、回滚 | 测试源/目标库或仿真引擎 |
+| 数据面测试 | SeaTunnel 命令、取消、清理、质量分流、Swap、回滚和监督快照 | 测试源/目标库或仿真引擎 |
 | Benchmark | 生成准确率、Schema 覆盖率、P0/P1 拦截率、延迟 | 固定版本数据集；L2 单独隔离 |
 
 ## 5. 交付和文档沉淀
@@ -137,6 +155,6 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 
 - Compose 核心依赖可在 VM 启动，健康检查和数据卷可验证。
 - `/health` 能区分 PostgreSQL、Redis、MinIO、Vault 和 LLM 配置状态。
-- 一条 MySQL → Doris 链路通过 Profile、生成、门禁、双审批、Commit、执行、监督、质量报告和回滚验收。
+- 一条合成 MySQL → Doris 真实链路通过 Profile、生成、门禁、审批、Commit、SeaTunnel、监督、质量报告、原子 Swap 和回滚验收；不要求真实业务数据库。
 - 关键安全规则有自动化测试：自批拦截、职责混用拦截、过期/重放 Capability 拦截、指纹变更拒绝、Outbox 幂等。
 - Benchmark 结果可复现并关联制品版本、策略版本和运行环境。

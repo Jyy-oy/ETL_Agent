@@ -1,5 +1,6 @@
 """Stable API error payloads."""
 
+import logging
 from typing import Any
 
 from fastapi import Request
@@ -7,6 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+logger = logging.getLogger(__name__)
 
 
 class ErrorPayload(BaseModel):
@@ -77,7 +80,8 @@ async def http_error_handler(request: Request, exc: StarletteHTTPException) -> J
 
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """将未处理异常隐藏内部细节并返回统一的 500 响应。"""
-    del exc
+    # 只记录请求 ID 和堆栈供服务端排障，响应仍不暴露数据库、凭据或内部实现细节。
+    logger.exception("Unhandled API error request_id=%s", request_id_for(request), exc_info=exc)
     payload = ErrorPayload(
         code="INTERNAL_ERROR",
         message="An internal error occurred",

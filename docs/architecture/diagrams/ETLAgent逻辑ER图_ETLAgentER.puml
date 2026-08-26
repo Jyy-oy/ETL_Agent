@@ -68,6 +68,17 @@ entity execution_runs {
   engine_job_id : varchar
   status : varchar
 }
+entity benchmark_runs {
+  * id : uuid <<PK>>
+  --
+  project_id : uuid <<FK>>
+  created_by : uuid <<FK>>
+  level : varchar
+  dataset_digest : varchar
+  artifact_digest : varchar
+  metrics_json : jsonb
+  completed_at : timestamptz
+}
 entity outbox_events {
   * id : uuid <<PK>>
   --
@@ -95,6 +106,8 @@ preparations ||--o{ approval_requests
 preparations ||--o{ execution_runs
 pipeline_versions ||--o{ execution_runs
 execution_runs ||--o{ outbox_events
+projects ||--o{ benchmark_runs
+users ||--o{ benchmark_runs : created_by
 projects ||--o{ audit_events
 users ||--o{ audit_events
 users ||--o{ approval_requests : approver

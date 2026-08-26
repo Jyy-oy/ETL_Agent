@@ -173,10 +173,13 @@ services:
     image: apache/seatunnel:2.3.10
     profiles: ["data-plane"]
     restart: unless-stopped
+    environment:
+      # SeaTunnel 2.3.10 默认关闭 Hazelcast REST，否则 Zeta HTTP 适配器只能连通但不能调用
+      HZ_NETWORK_RESTAPI_ENABLED: ${HZ_NETWORK_RESTAPI_ENABLED:-true}
     command: ["/opt/seatunnel/bin/seatunnel-cluster.sh"]
     ports:
       - "${COMPOSE_BIND_IP:-127.0.0.1}:${SEATUNNEL_PORT:-5801}:5801"
-      - "${COMPOSE_BIND_IP:-127.0.0.1}:${SEATUNNEL_HTTP_PORT:-5802}:5802"
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${SEATUNNEL_HTTP_PORT:-5802}:8080"
       - "${COMPOSE_BIND_IP:-127.0.0.1}:${SEATUNNEL_MEMBER_PORT:-5803}:5803"
     volumes:
       - seatunnel_logs:/opt/seatunnel/logs

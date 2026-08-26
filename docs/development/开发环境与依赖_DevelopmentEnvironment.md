@@ -6,7 +6,7 @@
 - `uv` 管理 Python 环境、依赖和 `uv.lock`。
 - Docker Compose 默认只负责 PostgreSQL 16、Redis 7、MinIO、Vault；SeaTunnel 使用 `data-plane` profile 按需启动，MySQL 8.0.36 和 Doris 2.1.11 FE/BE 使用 `source-target` profile 按需启动。
 - LLM 通过远端百炼 OpenAI 兼容接口访问，不安装本地模型和 GPU 依赖。
-- 前端预留 Vue 3 + Vite + TypeScript，尚未创建前端目录。
+- 前端已采用 Vue 3 + Vite + TypeScript，源码位于 `frontend/`，可通过 `npm run dev` 启动开发服务器。
 
 ## 2. Python 依赖分层
 
@@ -34,7 +34,7 @@ uv run ruff check .
 uv run mypy src
 ```
 
-当前仓库已建立 `src`、`tests` 和 M1/M2.1 基础实现；连接登记与 Profile 契约已落地，真实连接探查和集成测试仍需按里程碑扩展。依赖解析和锁文件已准备好。
+当前仓库已建立 `src`、`tests`、迁移、M1-M5 控制面和 Worker 实现；连接登记、Profile、Harness、Outbox、SeaTunnel REST Adapter、真实 Doris 目标适配器和质量监督契约已落地，首期使用 VM 合成 MySQL/Doris 完成真实链路验证，不需要真实业务数据库。依赖解析和锁文件已准备好。
 
 如果开发机尚未安装 uv：
 
@@ -65,6 +65,7 @@ docker compose ps
 
 - `.env.example` 只保存变量名和开发占位值，可提交。
 - `.env` 只保存本机值，已忽略，不得提交真实 API Key、JWT 密钥或 Ed25519 私钥。
+- `Settings` 会优先按源码位置读取项目根目录 `.env`，从 `src/etl_agent` 子目录启动也不会退回默认 `localhost`；开发时仍建议在项目根目录执行命令，便于迁移和排障。
 - 百炼配置只填 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`；不要把 API Key 写入源码、测试固件或日志。
 - `LLM_MAX_PROMPT_BYTES` 默认限制脱敏 Prompt 大小；`LLM_REAL_SMOKE_ENABLED=false` 默认关闭真实百炼测试，只有使用非生产密钥和脱敏数据时才临时开启。
 - `CHECKPOINT_INTEGRATION_ENABLED=false` 默认关闭 VM PostgreSQL Checkpoint 测试；依赖健康后可执行 `CHECKPOINT_INTEGRATION_ENABLED=true uv run pytest tests/integration/test_m3_runtime.py -m integration`。

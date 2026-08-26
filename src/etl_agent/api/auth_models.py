@@ -9,11 +9,19 @@ from etl_agent.infrastructure.models import ProjectRole
 
 
 class RegisterRequest(BaseModel):
-    """本地开发环境注册用户所需字段。"""
+    """本地开发环境注册用户所需字段，可选绑定项目 Checker 职责。"""
 
     username: str = Field(min_length=3, max_length=128, pattern=r"^[a-zA-Z0-9_.-]+$")
     display_name: str = Field(min_length=1, max_length=256)
     password: str = Field(min_length=8, max_length=256)
+    # 仅用于开发环境便捷注册；生产环境应由项目管理员分配职责。
+    project_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+    )
+    project_role: ProjectRole | None = None
 
 
 class LoginRequest(BaseModel):

@@ -45,6 +45,9 @@ def test_m1_auth_and_project_routes_are_registered() -> None:
     assert "/api/v1/auth/login" in paths
     assert "/api/v1/projects" in paths
     assert "/api/v1/projects/{project_id}/members" in paths
+    assert "/api/v1/projects/{project_id}/pipelines" in paths
+    assert "/api/v1/pipelines/{pipeline_id}/versions" in paths
+    assert "/api/v1/connections/{connection_id}" in paths
     assert "/api/v1/connections/{connection_id}/tests" in paths
     assert "/api/v1/connections/{connection_id}/profiles" in paths
     assert "/api/v1/file-assets" in paths
@@ -58,6 +61,15 @@ def test_m1_auth_and_project_routes_are_registered() -> None:
     assert "/api/v1/approval-requests/{approval_id}/decisions" in paths
     assert "/api/v1/preparations/{preparation_id}/commit" in paths
     assert "/api/v1/execution-runs/{execution_id}" in paths
+    assert "/api/v1/execution-runs/{execution_id}/cancel" in paths
+    assert "/api/v1/execution-runs/{execution_id}/rollback" in paths
+    assert "/api/v1/execution-runs/{execution_id}/supervision" in paths
+    assert "/api/v1/execution-runs/{execution_id}/quality" in paths
+    assert "/api/v1/projects/{project_id}/preparations" in paths
+    assert "/api/v1/projects/{project_id}/execution-runs" in paths
+    assert "/api/v1/benchmarks/run" in paths
+    assert "/api/v1/projects/{project_id}/benchmarks" in paths
+    assert "/api/v1/benchmarks/{benchmark_id}" in paths
 
 
 def test_role_assignment_rejects_checker_overlap() -> None:
