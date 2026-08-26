@@ -108,6 +108,16 @@ M3.1 实现对应 `src/etl_agent/workflows/graph.py`、`src/etl_agent/workflows/
 
 副作用：只写控制面事实，不调用源库写接口或 SeaTunnel。
 
+M4.1 实现：`POST /api/v1/versions/{version_id}/prepare` 只接受已通过门禁且 `immutable=true` 的版本；服务端重新读取项目内 Profile 指纹，使用 PDP v1 计算 P0-P3 风险和 Checker 槽，保存 `preparations` 事实、输入指纹、预算、资源范围和有效期。M4.2 已在此基础上接入审批槽。
+
+M4.2 实现：Prepare 同步创建 `approval_requests`；`POST /api/v1/approval-requests/{approval_id}/decisions` 使用 Preparation 行锁和审批槽行锁，检查当前用户是否拥有对应 Checker 职责且不是申请人。全部槽批准后才进入 `approved`，拒绝、过期或重复决定均返回稳定错误。
+
+M4.3 基础能力：`harness/capability.py` 使用 Ed25519 对 `capability.v1` 声明签名和验签，绑定主体、工具、环境、Preparation、制品摘要与过期时间；`RedisReplayGuard` 对令牌摘要执行 `SET NX EX`。Capability 只有在 Commit 完成指纹复核后才允许签发和消费。
+
+M4.4 实现：`POST /api/v1/preparations/{preparation_id}/commit` 使用 Preparation 行锁和版本/Profile 查询重新计算输入指纹；通过审批和有效期检查后签发 Capability，并在同一个 PostgreSQL 事务中创建 `ExecutionRun`、`OutboxEvent` 和 `EvidenceLedgerEvent`，将 Preparation 设置为 `committed`。重复 Commit 按 Preparation 唯一约束或 `Idempotency-Key` 返回已有执行事实；`GET /api/v1/execution-runs/{execution_id}` 只返回脱敏状态和摘要。Outbox 当前保存内部消费所需的 Capability 原文，生产部署必须改用 Vault/KMS 信封加密。
+
+M5.1 实现：`workers/dispatcher.py` 是 Outbox Tool Broker，消费前验签 Capability、校验 Preparation/制品绑定并执行 Redis Replay Guard，再通过 `ExecutionEngine` 端口调用 `SeaTunnelAdapter`。Celery 任务只负责调度事件 ID 和建立短生命周期依赖，不在进程内保存执行状态；真实 Zeta HTTP 路径通过配置注入，后续集成测试确认具体版本契约。
+
 ### Approve
 
 输入：Preparation 冻结视图和所需角色槽。

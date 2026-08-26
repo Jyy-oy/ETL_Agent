@@ -32,7 +32,8 @@
 | `execution_runs` | SeaTunnel 作业和运行指标 | 由 Commit 事务创建 |
 | `runtime_supervision_snapshots` | 运行时监督快照 | 按运行和时间索引 |
 | `outbox_events` | 可靠投递命令 | event_id 幂等 |
-| `audit_events` | 哈希链审计证据 | `prev_hash`/`event_hash` |
+| `evidence_ledger_events` | 项目级追加式哈希链审计证据 | `project_id + sequence_number` 唯一，`prev_event_hash`/`event_hash` |
+| `audit_events` | 面向查询的业务审计索引 | 后续阶段从账本事件投影 |
 
 M2.1 已落地 `connections` 和 `metadata_profiles`：连接表只保存 host/port/database/username、非敏感 options 和 Vault `secret_ref`；Profile 表保存版本、指纹、Schema 快照、脱敏样本和近似行数。Profile 通过 `(connection_id, fingerprint)` 唯一约束保证同一快照可复用。
 
@@ -42,6 +43,12 @@ M2.3 的 `file_assets` 保存项目归属、上传用户、MinIO bucket/object k
 
 M3.1 已落地 `pipelines`、`pipeline_versions`、`agent_runs` 和 `generation_attempts`（迁移 `0005_agent_generation`、`0006_agent_run_request`）。草稿版本允许生成写入；门禁通过后才写入规范化 EtlPlan、HOCON、`artifact_digest` 并设置 `immutable=true`。AgentRun 保存 thread/provider/model、Prompt 摘要、脱敏请求快照、节点轨迹、修复次数和错误码；每次候选或修复只保存输出摘要与校验错误，不保存完整 Prompt、API Key 或未脱敏样本。LangGraph Checkpoint 由 PostgreSQL 独立表承载，不能以进程内存替代。
 
+M4.1 已落地 `preparations`（迁移 `0007_preparations`）。Prepare 只接受 `immutable=true` 且 `ready` 的 PipelineVersion，重新读取项目内 Profile 指纹，由 PDP v1 计算风险级别和所需 Checker 槽，并保存输入指纹、资源范围、预算、策略版本、脱敏事实和过期时间；该阶段不触发任何外部写操作。
+
+M4.2 已落地 `approval_requests`（迁移 `0008_approval_requests`）。Prepare 按 PDP 返回的 Checker 槽创建唯一审批请求；Approve 以行锁保护单槽决策和 Preparation 状态汇聚，拒绝申请人自批、无职责用户、过期 Preparation 和重复决策。所有槽批准后才进入 `approved`，任一槽拒绝则进入 `rejected`。
+
+M4.4 已落地 `execution_runs`、`outbox_events` 和 `evidence_ledger_events`（迁移 `0009_execution_outbox_ledger`）。Commit 重新读取版本/Profile 指纹并校验审批，在同一事务中写入排队状态的 ExecutionRun、`execution.submit` Outbox 命令和账本事件；ExecutionRun 只保存 Capability 摘要，Outbox 的内部 Capability 原文暂为 MVP 实现，生产阶段改用 Vault/KMS 信封加密。Preparation 与 ExecutionRun、Outbox 使用唯一约束支持重复 Commit 幂等。
+
 ## 3. 关系约束
 
 - 所有项目资源必须可通过 `project_id` 追溯，查询默认带租户/项目过滤。
@@ -49,7 +56,7 @@ M3.1 已落地 `pipelines`、`pipeline_versions`、`agent_runs` 和 `generation_
 - `execution_runs` 不允许反向修改 `pipeline_versions` 或已完成审批。
 - `approval_requests.approver_id` 不能等于 Preparation Maker，且高风险槽不能由同一人占用。
 - `execution_runs.capability_token_digest` 只保存摘要，不保存 Capability 原文。
-- `audit_events` 只能追加，不提供普通更新/删除 API。
+- `evidence_ledger_events` 只能追加，不提供普通更新/删除 API；账本事件使用前序哈希和当前哈希校验完整性。
 
 ## 4. 索引与并发
 

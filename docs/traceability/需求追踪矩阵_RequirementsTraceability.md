@@ -28,4 +28,4 @@
 
 ## 2. 当前缺口
 
-仓库已完成 M1.2 控制面基础、M2.3 连接/Profile/文件资产核心能力和 M3.1 Agent 生成切片；SecretProvider、MySQL/Doris 连接测试、脱敏 Profile、文件校验、EtlPlan/HOCON 门禁和 fake Provider 已具备单元测试。真实业务库、MinIO 和百炼调用仍待配置业务数据与非生产 API Key 后补齐矩阵字段。
+仓库已完成 M1.2 控制面基础、M2.3 连接/Profile/文件资产核心能力、M3.2 Agent 生成边界、M4.4 Commit/Outbox/Ledger 和 M5.1 Worker/SeaTunnel Adapter 边界；SecretProvider、MySQL/Doris 连接测试、脱敏 Profile、文件校验、EtlPlan/HOCON 门禁、fake Provider、Prompt 上限、Commit 指纹/幂等、账本哈希链和 Adapter Mock 测试已具备验证证据。真实 SeaTunnel Zeta 作业、影子表/质量分流/Swap/回滚、真实业务数据和百炼调用仍待补齐矩阵字段。

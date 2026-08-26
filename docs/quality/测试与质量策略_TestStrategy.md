@@ -77,6 +77,6 @@ uv lock --check
 
 每次发布保留提交 SHA、制品摘要、测试报告、迁移版本、环境配置摘要、Benchmark 结果和已知风险。报告不得包含 API Key、密码或未脱敏业务数据。
 
-## 7. M3.1 当前证据
+## 7. M3.2 当前证据
 
-`tests/unit/test_m3_generation.py` 已覆盖合法候选、缺参人工中断、未知字段/错误枚举、预算越权、非法 HOCON、有限修复、预算裁剪和 OpenAI-compatible Provider。全量 pytest 当前 27 项通过；VM PostgreSQL 已升级到 `0006_agent_run_request`，Checkpoint setup 和同一 `thread_id` 的澄清恢复已手工验证。真实百炼调用仍需非生产 API Key 和脱敏业务 Profile 后单独验收。
+`tests/unit/test_m3_generation.py` 已覆盖合法候选、缺参人工中断、未知字段/错误枚举、预算越权、非法 HOCON、有限修复、预算裁剪、Prompt 大小上限、瞬态重试和 OpenAI-compatible Provider。`tests/integration/test_m3_runtime.py` 提供 VM Checkpoint 和真实百炼 smoke test，默认通过配置开关跳过。全量 pytest 当前 29 项通过、2 项显式跳过；VM PostgreSQL Checkpoint 集成测试已开启验证通过。真实百炼调用仍需非生产 API Key 和脱敏业务 Profile 后单独验收。

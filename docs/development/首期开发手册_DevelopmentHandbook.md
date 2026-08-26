@@ -57,6 +57,7 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 - M3.1 已完成最小可验证切片：`GenerationRequest`、`EtlPlan`、`QualityContract`、`RuntimeBudget` 和 Profile 引用模型位于 `src/etl_agent/domain/generation.py`。
 - LangGraph 节点已按 `IntentParseNode → ProfileEnrichmentNode → CandidateGenerationNode → SchemaValidationNode → HoconCompileNode → DeterministicGateNode → RepairNode` 编排；缺少 Profile 或增量字段时返回 `needs_clarification`，不调用 LLM。
 - 百炼通过 OpenAI-compatible `LLMProvider` 适配器调用，具备超时、有限重试、JSON 解析、脱敏和 API Key 不落日志保护；`FakeLLMProvider` 用于离线测试。
+- M3.2 增加 `LLM_MAX_PROMPT_BYTES` 发送前硬上限，以及默认关闭的 `LLM_REAL_SMOKE_ENABLED` / `CHECKPOINT_INTEGRATION_ENABLED` 集成测试开关。
 - 候选必须通过 Pydantic/JSON Schema、Profile/字段引用、预算上限和 PyHOCON 编译校验；非法候选最多自动修复一次，超限返回 `validation_failed`，不能冻结版本。
 - `POST /api/v1/pipelines` 创建 Pipeline，`POST /api/v1/pipelines/{pipeline_id}/versions` 创建草稿，`POST /api/v1/versions/{version_id}/generation` 运行生成；门禁通过才写入 SHA-256 摘要并将版本标记为 immutable。
 - PostgreSQL Checkpoint 使用 `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`；API 每次生成使用配置的 `LANGGRAPH_CHECKPOINT_DATABASE_URL`，生产部署应确保同一 thread_id 复用同一数据库。
@@ -66,15 +67,18 @@ uv run uvicorn etl_agent.main:app --host 127.0.0.1 --port 8000
 
 ### 阶段 4：Harness 协议
 
-- 实现 PDP 风险评级和审批槽分配。
+- M4.1 已完成 PDP v1 风险评级和审批槽分配；`POST /api/v1/versions/{version_id}/prepare` 只冻结通过门禁的不可变版本和 Profile 指纹，不产生外部副作用。
+- M4.2 已完成独立审批槽和 `POST /api/v1/approval-requests/{approval_id}/decisions`；服务端拦截申请人自批、职责不匹配、过期和重复决定，全部 Checker 槽批准后 Preparation 才进入 `approved`。
+- M4.3/M4.4 已完成 Ed25519 Capability 声明/签发/验签、Redis `SET NX EX` Replay Guard、Commit 指纹复核、ExecutionRun、Transactional Outbox 和 Evidence Ledger；`POST /api/v1/preparations/{preparation_id}/commit` 不返回 Capability 原文，重复提交按 Preparation/Idempotency-Key 返回已有执行事实。
 - Prepare 只冻结事实，Approve 只写决定，Commit 重新验指纹。
 - Capability 绑定主体、工具、环境、制品摘要和过期时间；Replay Guard 必须是 Redis 原子消费。
-- Tool Broker 是副作用唯一出口，Outbox 与 ExecutionRun 在一个 PostgreSQL 事务中落库。
-- Evidence Ledger 用前序哈希和当前哈希形成追加链。
+- Tool Broker 是副作用唯一出口，Outbox 与 ExecutionRun 在一个 PostgreSQL 事务中落库；当前 Outbox 内部字段暂保存 Capability 原文，后续生产化切换 Vault/KMS 信封加密。
+- Evidence Ledger 用前序哈希、载荷摘要和当前哈希形成项目级追加链，Commit 事件与执行事实同事务落库。
 
 ### 阶段 5：数据面和监督
 
-- Celery 只消费受管命令，验签后调用 SeaTunnel adapter。
+- M5.1 已完成 Celery 应用工厂、Outbox Tool Broker、Capability/Replay Guard 消费和 SeaTunnel Adapter 的提交/状态/取消边界；Worker 从 Outbox 读取冻结 PipelineVersion 的 HOCON，不能接收未经 Commit 的直接命令。由于 Capability 在副作用前单次消费，当前不对未知提交结果自动重试，待确认引擎幂等键后再开启。
+- SeaTunnel 2.3.10 的真实 Zeta API 路径仍需在 VM 联调确认，路径通过 `SEATUNNEL_SUBMIT_PATH`、`SEATUNNEL_STATUS_PATH` 和 `SEATUNNEL_CANCEL_PATH` 配置，不应散落在业务用例中。
 - 影子表、错误表、QualityContract 和原子 Swap 分开建模。
 - 运行快照记录行数、字节、时长、放大比、拒绝率和决策；超限时可取消或硬中断。
 - 回滚必须幂等，重复请求不能破坏已恢复状态。

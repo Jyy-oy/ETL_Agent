@@ -32,7 +32,7 @@ class LLMProvider(Protocol):
     async def ask_clarification(self, context: ClarificationContext) -> ClarificationQuestion: ...
 ```
 
-百炼、DeepSeek、Qwen 或企业网关只作为 Adapter 实现；Workflow 不直接导入具体 SDK。配置至少包含 Provider、Base URL、模型、超时、重试和 Prompt 版本。
+百炼、DeepSeek、Qwen 或企业网关只作为 Adapter 实现；Workflow 不直接导入具体 SDK。配置至少包含 Provider、Base URL、模型、超时、重试和 Prompt 版本；Provider 还受 `LLM_MAX_PROMPT_BYTES` 限制，超限会在网络请求前返回稳定错误 `LLM_PROMPT_TOO_LARGE`。
 
 ## 4. 输入安全
 
@@ -60,3 +60,9 @@ class LLMProvider(Protocol):
 2. 返回未知字段和非法 HOCON，观察 Gate 拒绝和有限修复。
 3. 修改 Profile 摘要后重新 Commit，观察指纹漂移拒绝。
 4. 给输入加入“忽略安全规则”的 Prompt 注入，确认模型输出不能扩大工具权限。
+
+真实 smoke test 仅在明确开启 `LLM_REAL_SMOKE_ENABLED=true`、使用非生产密钥和脱敏 Profile 后执行：
+
+```bash
+uv run pytest tests/integration/test_m3_runtime.py::test_real_bailian_provider_smoke -m integration
+```

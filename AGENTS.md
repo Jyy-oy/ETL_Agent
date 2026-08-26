@@ -10,7 +10,7 @@ ETL-Agent 是企业数据集成控制面：自然语言需求经过 LangGraph �
 
 ## 2. 当前状态和技术边界
 
-- 仓库已完成 M1.2 控制面基础、M2.3 连接/Profile/文件资产基础和 M3.1 Agent 生成切片；Python 3.12 + uv 依赖和 `uv.lock` 已准备，已建立 `src/`、`tests/`、`migrations/`、CI、`/health`、JWT/项目成员 API、Vault SecretProvider、MySQL/Doris 连接测试、数据库/文件 Profile、MinIO 文件资产 API、EtlPlan/HOCON 门禁、LangGraph 生成、澄清恢复和不可变 PipelineVersion API。Worker、前端、Prepare/Approve/Commit 和仓库内 SeaTunnel 作业配置仍待实现。
+- 仓库已完成 M1.2 控制面基础、M2.3 连接/Profile/文件资产基础、M3.2 Agent 生成边界、M4.4 Harness Commit 和 M5.1 Worker/Adapter 边界；Python 3.12 + uv 依赖和 `uv.lock` 已准备，已建立 `src/`、`tests/`、`migrations/`、CI、`/health`、JWT/项目成员 API、Vault SecretProvider、MySQL/Doris 连接测试、数据库/文件 Profile、MinIO 文件资产 API、EtlPlan/HOCON 门禁、LangGraph 生成、澄清恢复、Prompt 上限、不可变 PipelineVersion、PDP 风险决策、Preparation、独立审批 API、Ed25519 验签、Redis Replay Guard、Commit/ExecutionRun、Transactional Outbox、Evidence Ledger、Celery Tool Broker、SeaTunnel Adapter 和 MySQL/Doris `source-target` Compose profile。真实 Zeta 联调、质量分流、合成数据初始化、影子表/原子 Swap、回滚、前端和完整运行监督仍待实现。
 - Windows/PyCharm 是后续控制面开发环境；截至 2026-08-25，Ubuntu VM `192.168.181.128` 已由 Compose 启动 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel，核心基础设施均处于运行状态；SeaTunnel 使用不传 `-r` 的单节点默认 `MASTER_AND_WORKER` 角色。VM 端口已对开发机开放，Windows 到 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel 的 TCP/协议级检查均通过。
 - LLM 只调用远端百炼，不在本地或 VM 部署模型。
 - 详细学习、Agent 约定和源码阅读入口见 [项目学习资料](项目学习资料_ProjectLearning/AGENTS.md)。

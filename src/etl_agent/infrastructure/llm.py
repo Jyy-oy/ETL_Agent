@@ -105,6 +105,7 @@ class OpenAICompatibleProvider:
         self.model = settings.llm_model
         self.timeout = settings.llm_request_timeout_seconds
         self.max_retries = settings.llm_max_retries
+        self.max_prompt_bytes = settings.llm_max_prompt_bytes
 
     async def generate_structured(
         self,
@@ -126,6 +127,9 @@ class OpenAICompatibleProvider:
             if previous_candidate
             else None,
         }
+        user_content = json.dumps(prompt_data, ensure_ascii=False)
+        if len(user_content.encode("utf-8")) > self.max_prompt_bytes:
+            raise LLMProviderError("LLM_PROMPT_TOO_LARGE", "发送到 LLM 的脱敏 Prompt 超出大小上限")
         messages = [
             {
                 "role": "system",
@@ -134,7 +138,7 @@ class OpenAICompatibleProvider:
                     "不要调用工具，不要决定权限、预算、审批或执行动作。"
                 ),
             },
-            {"role": "user", "content": json.dumps(prompt_data, ensure_ascii=False)},
+            {"role": "user", "content": user_content},
         ]
         request_body = {
             "model": self.model,

@@ -1,5 +1,75 @@
 # ETL-Agent 学习资料与工程沉淀变更记录
 
+## 2026-08-26：M5.1 Celery/Outbox/SeaTunnel Adapter 边界完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 5 数据面闭环
+- 根因与解决过程：新增 Celery 应用工厂、Outbox Tool Broker、Capability 验签与 Redis Replay Guard 消费、SeaTunnel Zeta HTTP Adapter，以及提交/状态/取消端口。Worker 只从待投递 Outbox 读取冻结 PipelineVersion 的 HOCON，不接收 API 用户直接命令；成功提交后更新 ExecutionRun 为 `running`，失败记录稳定错误并标记 Outbox/ExecutionRun 失败。
+- 未完成：SeaTunnel 2.3.10 实际 Zeta API 联调、带引擎幂等键的安全重试、影子表/错误表、QualityContract、运行监督、原子 Swap、取消回滚和合成数据初始化留待 M5.2/M5.3；当前不对已消费 Capability 自动重试。
+- 验证证据：42 项测试通过、2 项外部集成测试默认跳过；Ruff、Mypy 通过。SeaTunnel Adapter 使用 MockTransport 覆盖提交、状态和取消映射。
+- 涉及文件：`src/etl_agent/workers/celery_app.py`、`src/etl_agent/workers/tasks.py`、`src/etl_agent/workers/dispatcher.py`、`src/etl_agent/workers/engine.py`、`tests/unit/test_m5_engine.py`
+
+## 2026-08-26：M4.4 Commit、ExecutionRun、Transactional Outbox 与 Evidence Ledger 完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 4 Harness 与审批
+- 根因与解决过程：新增 `POST /api/v1/preparations/{preparation_id}/commit` 和 `GET /api/v1/execution-runs/{execution_id}`；Commit 在 Preparation 行锁下重新计算版本/Profile 指纹，校验审批槽，签发绑定主体、环境、Preparation 和制品摘要的 Ed25519 Capability，并在同一 PostgreSQL 事务中创建 `execution_runs`、`outbox_events` 和追加式 `evidence_ledger_events`。重复提交按 Preparation/Idempotency-Key 返回已有执行事实，响应不包含 Capability 原文。
+- 安全与限制：Outbox 当前保存内部 Worker 所需的 Capability 原文，未通过 API、日志或执行查询暴露；生产阶段应改为 Vault/KMS 信封加密。Evidence Ledger 使用前序哈希、载荷摘要和当前哈希形成项目级追加链，并保留并发锁定点。
+- 验证证据：39 项测试通过、2 项外部集成测试默认跳过；Ruff、Mypy 通过；Alembic 已将 VM PostgreSQL 升级到 `0009_execution_outbox_ledger`。
+- 涉及文件：`src/etl_agent/api/preparations.py`、`src/etl_agent/api/preparation_models.py`、`src/etl_agent/harness/ledger.py`、`src/etl_agent/harness/models.py`、`src/etl_agent/infrastructure/models.py`、`migrations/versions/0009_execution_outbox_ledger.py`、`tests/unit/test_m4_commit.py`
+
+## 2026-08-26：新增 MySQL/Doris 合成数据面 Compose Profile
+
+- 级别：开发环境/部署准备
+- 类型：配置增强
+- 来源：M5 数据面联调前置
+- 根因与解决过程：确认 SeaTunnel 2.3.10 Doris Connector 支持 Doris `>=1.1.x`；选择 `mysql:8.0.36`、`apache/doris:fe-2.1.11` 和 `apache/doris:be-2.1.11` 作为 amd64 开发基线。原 Compose 新增 `source-target` profile、MySQL 持久化卷、Doris FE/BE 静态网络和 SeaTunnel 到 Doris 网络的连接；默认基础设施启动行为不变。
+- 注意事项：Doris FE/BE 必须同版本；单机仍需两个容器；启动前检查 VM 资源和 `172.30.0.0/24` 网段冲突。VM 已完成镜像拉取并启动三项服务，SeaTunnel 端到端作业仍未执行。
+- 验证证据：Docker Hub 标签存在且 amd64 镜像可用；Compose YAML 通过 Python YAML 解析。Windows 本机未安装 Docker CLI，Compose 展开和实际启动需在 VM 验证。
+- 涉及文件：`docker-compose.yml`、`.env.example`、`docs/operations/Ubuntu虚拟机部署_LocalVMDeployment.md`、`docs/architecture/首期技术选型_InitialTechnicalSelection.md`
+
+## 2026-08-26：M4.3 Capability 与 Replay Guard 基础完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 4 Harness 与审批
+- 根因与解决过程：新增 Ed25519 Capability v1，令牌绑定主体、工具、环境、Preparation、制品摘要和有效期；新增 Redis Replay Guard，按令牌 SHA-256 摘要使用 `SET NX EX` 原子消费。Capability 当前只提供领域/基础设施端口，尚未由 Commit/API 单独签发。
+- 未完成：Commit 指纹复核、事务性 ExecutionRun/Outbox 和 Evidence Ledger 留待后续 M4 切片。
+- 验证证据：36 项单元/API 测试通过、2 项外部集成测试默认跳过；Ruff、Mypy、Alembic check、锁文件检查通过；VM PostgreSQL 当前为 `0008_approval_requests`。
+- 涉及文件：`src/etl_agent/harness/capability.py`、`src/etl_agent/config.py`、`tests/unit/test_m4_capability.py`
+
+## 2026-08-26：M4.2 独立审批槽与 Checker 决策完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 4 Harness 与审批
+- 根因与解决过程：新增 `approval_requests` 表和 `POST /api/v1/approval-requests/{approval_id}/decisions`；Prepare 按 PDP 结果创建唯一 Checker 槽，Approve 使用 Preparation/审批行锁，校验当前用户职责、申请人自批、过期和重复决策，全部槽批准后才将 Preparation 置为 `approved`，任一拒绝则置为 `rejected`。
+- 未完成：Commit 指纹复核、Ed25519 Capability、Redis Replay Guard、Transactional Outbox、Evidence Ledger 留待后续 M4 切片。
+- 验证证据：32 项单元/API 测试通过、2 项外部集成测试默认跳过；Ruff、Mypy、Alembic check 通过；VM PostgreSQL 已升级到 `0008_approval_requests`。
+- 涉及文件：`src/etl_agent/api/preparations.py`、`src/etl_agent/api/preparation_models.py`、`src/etl_agent/harness/models.py`、`src/etl_agent/infrastructure/models.py`、`migrations/versions/0008_approval_requests.py`
+
+## 2026-08-26：M4.1 PDP 与 Prepare 基础切片完成
+
+- 级别：开发实现
+- 类型：新增
+- 来源：阶段 4 Harness 与审批
+- 根因与解决过程：新增确定性 PDP v1，根据环境、目标写入、数据分级和运行预算计算 P0-P3 风险及 Checker 审批槽；新增 `preparations` 表和 `POST /api/v1/versions/{version_id}/prepare`，只允许对已通过门禁的不可变 PipelineVersion 冻结 Profile 指纹、资源范围、预算、策略版本和有效期，不执行源库、目标库或 SeaTunnel 副作用。
+- 未完成：Approve 决策、Ed25519 Capability、Redis Replay Guard、Transactional Outbox、Evidence Ledger 留待 M4.2/M4.3。
+- 验证证据：32 项单元/API 测试通过、2 项外部集成测试默认跳过；Ruff、Mypy、Alembic check 通过；VM PostgreSQL 已升级到 `0007_preparations`。
+- 涉及文件：`src/etl_agent/harness/`、`src/etl_agent/api/preparations.py`、`src/etl_agent/api/preparation_models.py`、`src/etl_agent/infrastructure/models.py`、`migrations/versions/0007_preparations.py`、`tests/unit/test_m4_harness.py`
+
+## 2026-08-26：M3.2 Provider 边界与集成测试入口完成
+
+- 级别：开发实现
+- 类型：增强
+- 来源：阶段 3 M3.2
+- 根因与解决过程：增加 `LLM_MAX_PROMPT_BYTES` Prompt 字节上限，超限请求在网络调用前拒绝；增加 `LLM_REAL_SMOKE_ENABLED` 和 `CHECKPOINT_INTEGRATION_ENABLED` 显式测试开关；补充 Provider 瞬态错误重试、超限拒绝和显式集成测试。VM PostgreSQL Checkpoint 自动化测试已通过，真实百炼测试默认关闭。
+- 未完成：真实百炼非生产调用验收、Prepare/Approve/Commit 和 SeaTunnel 执行留待后续阶段。
+- 验证证据：全量 pytest 29 项通过、2 项集成测试默认跳过；Ruff、Mypy 通过；Checkpoint 集成测试显式开启后通过。
+- 涉及文件：`src/etl_agent/config.py`、`src/etl_agent/infrastructure/llm.py`、`.env.example`、`tests/unit/test_m3_generation.py`、`tests/integration/test_m3_runtime.py`
+
 ## 2026-08-25：M3.1 Agent 结构化生成切片完成
 
 - 级别：开发实现

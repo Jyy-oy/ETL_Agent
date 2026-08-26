@@ -85,6 +85,88 @@ services:
       - vault_data:/vault/file
     networks: [etl_agent]
 
+  # Optional synthetic source database. Start with the source-target profile.
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.0.36}
+    profiles: ["source-target"]
+    restart: unless-stopped
+    command:
+      [
+        "--character-set-server=utf8mb4",
+        "--collation-server=utf8mb4_0900_ai_ci",
+        "--default-time-zone=+00:00",
+      ]
+    environment:
+      MYSQL_DATABASE: ${SOURCE_MYSQL_DATABASE:-etl_demo}
+      MYSQL_USER: ${SOURCE_MYSQL_USER:-etl_demo}
+      MYSQL_PASSWORD: ${SOURCE_MYSQL_PASSWORD:-etl_demo_dev}
+      MYSQL_ROOT_PASSWORD: ${SOURCE_MYSQL_ROOT_PASSWORD:-root_dev_only}
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD} --silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks: [etl_agent]
+
+  # Doris FE/BE must use the same pinned version; this is a single-node test cluster.
+  doris-fe:
+    image: ${DORIS_FE_IMAGE:-apache/doris:fe-2.1.11}
+    profiles: ["source-target"]
+    restart: unless-stopped
+    hostname: doris-fe
+    environment:
+      FE_SERVERS: ${DORIS_FE_SERVERS:-fe1:172.30.0.10:9010}
+      FE_ID: ${DORIS_FE_ID:-1}
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${DORIS_FE_HTTP_PORT:-8030}:8030"
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${DORIS_FE_QUERY_PORT:-9030}:9030"
+    volumes:
+      - doris_fe_meta:/opt/apache-doris/fe/doris-meta
+      - doris_fe_log:/opt/apache-doris/fe/log
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8030/api/bootstrap >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+    networks:
+      etl_agent: {}
+      doris_net:
+        ipv4_address: ${DORIS_FE_IP:-172.30.0.10}
+
+  doris-be:
+    image: ${DORIS_BE_IMAGE:-apache/doris:be-2.1.11}
+    profiles: ["source-target"]
+    restart: unless-stopped
+    hostname: doris-be
+    depends_on:
+      doris-fe:
+        condition: service_started
+    environment:
+      FE_SERVERS: ${DORIS_FE_SERVERS:-fe1:172.30.0.10:9010}
+      BE_ADDR: ${DORIS_BE_ADDR:-172.30.0.11:9050}
+    ports:
+      - "${COMPOSE_BIND_IP:-127.0.0.1}:${DORIS_BE_HTTP_PORT:-8040}:8040"
+    volumes:
+      - doris_be_storage:/opt/apache-doris/be/storage
+      - doris_be_log:/opt/apache-doris/be/log
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8040/api/health >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+    networks:
+      etl_agent: {}
+      doris_net:
+        ipv4_address: ${DORIS_BE_IP:-172.30.0.11}
+
   # Optional data-plane service. Start with:
   # docker compose --profile data-plane up -d seatunnel
   seatunnel:
@@ -99,7 +181,9 @@ services:
     volumes:
       - seatunnel_logs:/opt/seatunnel/logs
       - ./seatunnel/config:/opt/seatunnel/config:ro
-    networks: [etl_agent]
+    networks:
+      etl_agent: {}
+      doris_net: {}
 
 volumes:
   postgres_data:
@@ -107,7 +191,17 @@ volumes:
   minio_data:
   vault_data:
   seatunnel_logs:
+  mysql_data:
+  doris_fe_meta:
+  doris_fe_log:
+  doris_be_storage:
+  doris_be_log:
 
 networks:
   etl_agent:
     driver: bridge
+  doris_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DORIS_DOCKER_SUBNET:-172.30.0.0/24}

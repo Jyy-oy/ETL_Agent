@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
+    celery_task_default_queue: str = "etl-agent"
+    celery_worker_concurrency: int = 4
     replay_guard_redis_url: str = "redis://localhost:6379/3"
 
     minio_endpoint: str = "http://localhost:9000"
@@ -53,13 +55,25 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_request_timeout_seconds: int = 60
     llm_max_retries: int = 2
+    llm_max_prompt_bytes: int = 100_000
+    llm_real_smoke_enabled: bool = False
+    checkpoint_integration_enabled: bool = False
+    preparation_ttl_seconds: int = 300
 
     seatunnel_zeta_endpoint: str = "http://localhost:5801"
+    seatunnel_submit_path: str = "/submit"
+    seatunnel_status_path: str = "/jobs/{job_id}"
+    seatunnel_cancel_path: str = "/jobs/{job_id}/cancel"
     health_check_timeout_seconds: float = 5.0
 
     jwt_secret_key: str = "replace-with-a-random-32-byte-secret"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+
+    capability_private_key_path: str = "./secrets/capability_ed25519_private.pem"
+    capability_public_key_path: str = "./secrets/capability_ed25519_public.pem"
+    capability_ttl_seconds: int = 300
+    replay_guard_ttl_seconds: int = 300
 
     @property
     def cors_origins_list(self) -> list[str]:

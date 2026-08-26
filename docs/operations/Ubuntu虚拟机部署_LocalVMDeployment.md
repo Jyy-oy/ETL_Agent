@@ -1,6 +1,6 @@
 # Ubuntu 虚拟机部署手册
 
-本文针对 Ubuntu 虚拟机 `192.168.181.128`，部署 ETL-Agent 首期基础设施。当前 Compose 不启动 FastAPI、Celery 或 Vue，因为仓库尚无这些应用源码；它们会在后续实现后加入。
+本文针对 Ubuntu 虚拟机 `192.168.181.128`，部署 ETL-Agent 首期基础设施。当前 Compose 仍不启动 FastAPI、Celery 或 Vue 应用容器；控制面 API 和 M5.1 Worker 代码已存在，待应用镜像、运行用户和生产级密钥配置确认后再加入 Compose。
 
 ## 1. 目标拓扑
 
@@ -16,13 +16,14 @@ Ubuntu VM 192.168.181.128
   ├─ minio:9000 / console:9001
   ├─ vault:8200 (开发模式)
   └─ seatunnel:5801-5803 (可选 profile)
+  └─ source-target profile：MySQL 8.0.36 + Doris 2.1.11 FE/BE（可选）
         |
         └─ 远端百炼 LLM API（HTTPS）
 ```
 
 ## 2. VM 前置条件
 
-建议 Ubuntu 22.04/24.04、4 vCPU、8 GB RAM、50 GB 可用磁盘。SeaTunnel profile 建议至少 8 GB RAM；只启动 PostgreSQL、Redis、MinIO 和 Vault 时 4 GB 可用于开发验证。
+建议 Ubuntu 22.04/24.04、4 vCPU、8 GB RAM、50 GB 可用磁盘。只启动 PostgreSQL、Redis、MinIO 和 Vault 时 4 GB 可用于开发验证；同时启动 SeaTunnel、MySQL 和 Doris FE/BE 建议至少 4 vCPU、12 GB RAM、80 GB 可用磁盘，性能测试建议 16 GB RAM 以上。
 
 在 VM 执行：
 
@@ -108,7 +109,48 @@ docker compose --profile data-plane logs -f seatunnel
 
 当前 Compose 使用单节点 `master_and_worker` 角色，启动时不传 `-r` 参数即可使用 SeaTunnel 2.3.10 的默认角色。该版本显式传入 `master_and_worker` 会被 Java 引擎拒绝；多节点部署时才分别使用 `-r master` 和 `-r worker`。如果镜像版本的启动脚本路径、角色参数或端口不同，应只修改 Compose 的 `seatunnel` 服务和本文件，不要改变控制面与数据面的边界。SeaTunnel 需要独立的作业配置和插件目录，业务连接凭据仍由 Vault/SecretProvider 注入。
 
-## 6. 日常操作
+## 6. 启动 MySQL/Doris 合成数据面（可选）
+
+当前基线固定使用 `mysql:8.0.36`、`apache/doris:fe-2.1.11` 和 `apache/doris:be-2.1.11`。Doris FE/BE 必须保持同一版本；SeaTunnel 2.3.10 的 Doris Connector 文档声明 Doris `>=1.1.x`，2.1.11 用于本地兼容性验证。MySQL/Doris 只作为合成源端和目标端，不会加入默认基础设施启动。
+
+截至 2026-08-26，VM 已完成三张镜像拉取并启动 MySQL、Doris FE、Doris BE；三者 Docker healthcheck 均为 `healthy`。只读验证已确认 MySQL `mysqld is alive`，Doris `SHOW BACKENDS` 返回 `Alive=true`。FE 启动早于 BE 注册时可能短暂出现 `available backend num is 0`，待 BE 心跳注册后会恢复，不能仅凭启动早期日志判断失败。
+
+先检查 VM 资源、Compose 展开结果和 Docker 网段是否冲突：
+
+```bash
+nproc
+free -h
+df -h .
+docker compose --profile source-target config >/tmp/etl-agent-source-target.yml
+docker network ls
+```
+
+确认没有网段冲突后，先只拉取镜像：
+
+```bash
+docker compose --profile source-target pull mysql doris-fe doris-be
+```
+
+拉取完成后再启动：
+
+```bash
+docker compose --profile source-target up -d mysql doris-fe doris-be
+docker compose --profile source-target ps
+```
+
+基础检查：
+
+```bash
+docker compose --profile source-target exec mysql \
+  sh -c 'mysqladmin ping -h localhost -uroot -p"$MYSQL_ROOT_PASSWORD" --silent'
+curl -fsS http://127.0.0.1:8030/api/bootstrap
+docker compose --profile source-target exec doris-fe \
+  mysql -h 127.0.0.1 -P 9030 -uroot -e 'SHOW FRONTENDS; SHOW BACKENDS;'
+```
+
+SeaTunnel 作业容器访问 MySQL 使用 `mysql:3306`，访问 Doris 使用 `doris-fe:8030`（Stream Load）和查询端口 `9030`，不能在容器内填写 `localhost`。如果 `172.30.0.0/24` 与 VM 现有 Docker 网络冲突，需要同时修改 `DORIS_DOCKER_SUBNET`、`DORIS_FE_IP`、`DORIS_BE_IP`、`DORIS_FE_SERVERS` 和 `DORIS_BE_ADDR`，然后再创建网络。
+
+## 7. 日常操作
 
 ```bash
 # 查看状态和最近日志
@@ -128,7 +170,7 @@ docker compose up -d
 
 不要在没有备份确认的情况下执行 `docker compose down -v`，该命令会删除数据库、Redis、MinIO 和 Vault 的命名卷。
 
-## 7. 防火墙建议
+## 8. 防火墙建议
 
 如果只在 VM 内运行应用，保持 `COMPOSE_BIND_IP=127.0.0.1`，不开放数据库端口。若需远程访问管理端口，可使用：
 
@@ -140,6 +182,6 @@ sudo ufw enable
 
 不要把 PostgreSQL、Redis 或 Vault 开发端口开放到不受信任的网络。
 
-## 8. 数据备份起点
+## 9. 数据备份起点
 
 首期至少建立 PostgreSQL `pg_dump` 和 MinIO bucket 备份策略。备份脚本应放在运维目录，不把导出的业务数据、Secret 或备份压缩包提交到 Git。

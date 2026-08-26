@@ -15,7 +15,7 @@ ETL-Agent 是面向企业数据集成的控制面平台：用自然语言生成�
 - Python 3.12 + uv；依赖和锁文件在根目录 `pyproject.toml`、`uv.lock`。
 - FastAPI + LangGraph + Celery 是控制面；PostgreSQL 16 保存业务事实、Checkpoint、Outbox 和审计；Redis 7 保存队列和短时防重放状态；MinIO 保存大对象；Vault 保存 SecretRef 对应凭据。
 - LLM 不在本地或 VM 部署，通过 `.env` 中的百炼 OpenAI 兼容配置远程调用。
-- Ubuntu VM 地址为 `192.168.181.128`；截至 2026-08-25，VM 已由 Docker Compose 启动 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel，核心基础设施均处于运行状态；SeaTunnel 使用不传 `-r` 的单节点默认 `MASTER_AND_WORKER` 角色。VM 端口已对开发机开放，Windows 到 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel 的 TCP/协议级检查均通过；仓库已有 `/health`、Identity/Project、连接/Profile、文件资产和 M3.1 生成 API，Worker、前端、澄清回答 API 和 Harness 执行协议仍待实现。
+- Ubuntu VM 地址为 `192.168.181.128`；截至 2026-08-26，VM 已由 Docker Compose 启动 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel，核心基础设施均处于运行状态；SeaTunnel 使用不传 `-r` 的单节点默认 `MASTER_AND_WORKER` 角色。VM 端口已对开发机开放，Windows 到 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel 的 TCP/协议级检查均通过；仓库已有 `/health`、Identity/Project、连接/Profile、文件资产、M3.2 生成边界、澄清恢复、M4.4 Commit/ExecutionRun/Outbox/Evidence Ledger、M5.1 Celery Tool Broker/SeaTunnel Adapter 和 MySQL/Doris `source-target` Compose profile，真实 Zeta 联调、前端、质量分流、运行监督和合成数据初始化仍待实现。
 - Windows/PyCharm 是后续控制面开发环境；应用进入 Compose 后改用服务名通信。
 
 ## 3. 学习资料使用顺序

@@ -53,14 +53,15 @@
 
 ## 里程碑 M3：Agent 生成
 
-当前进度：M3.1 已完成结构化生成、澄清回答恢复和版本冻结切片；真实百炼验收和跨请求恢复的自动化集成测试仍待补齐。
+当前进度：M3.2 已完成 Provider 边界加固和显式集成测试入口；真实百炼验收需由项目负责人开启非生产测试开关后执行。
 
 - [x] EtlPlan、Profile 引用、QualityContract、RuntimeBudget 和 ValidationIssue 严格模型。
 - [x] OpenAI-compatible 远端 Provider、超时/有限重试、脱敏请求和 fake Provider。
 - [x] LangGraph 意图检查、Profile 摘要、候选生成、Schema/HOCON 校验、确定性门禁和一次修复。
 - [x] PostgreSQL Checkpoint 封装、Pipeline/不可变 PipelineVersion/AgentRun/GenerationAttempt 迁移和最小生成 API。
 - [x] 澄清回答 `/api/v1/agent-runs/{run_id}/answers` 与同一 thread 的 API 恢复。
-- [ ] 使用 VM PostgreSQL 执行 Checkpoint setup 和真实百炼脱敏调用验收。
+- [x] Provider Prompt 字节上限、瞬态错误重试、显式集成测试标记和 VM Checkpoint 自动化测试。
+- [ ] 使用非生产 API Key 执行真实百炼脱敏调用验收。
 
 交付：LLMProvider、LangGraph、Checkpoint、澄清中断、EtlPlan/HOCON 结构化输出、门禁和不可变版本。
 
@@ -68,11 +69,26 @@
 
 ## 里程碑 M4：Harness 与审批
 
+当前进度：M4.4 已完成 PDP、Prepare、独立 Checker 审批、Ed25519 Capability、Commit、ExecutionRun、Transactional Outbox 和 Evidence Ledger；Celery/SeaTunnel Worker 消费仍属于 M5。
+
+- [x] PDP v1 根据环境、写入意图、数据分级和预算输出 P0-P3 风险及 Checker 槽。
+- [x] Prepare 校验不可变 PipelineVersion 和 Profile 项目边界，冻结输入指纹、资源范围、预算和有效期。
+- [x] Prepare 创建独立审批槽；Approve 校验 Checker 职责、申请人自批、过期和重复决策。
+- [x] Ed25519 Capability 绑定主体、工具、环境、Preparation 和制品摘要；Redis Replay Guard 使用 SET NX EX 原子消费。
+- [x] Commit 重新校验指纹、校验审批并在事务中创建 ExecutionRun。
+- [x] Transactional Outbox、ExecutionRun 查询和项目级 Evidence Ledger 哈希链。
+
 交付：PDP、Prepare/Approve/Commit、Ed25519 Capability、Replay Guard、Outbox、Evidence Ledger。
 
 完成条件：自批、职责混用、指纹漂移、过期/重放和事务失败均被拦截。
 
 ## 里程碑 M5：数据面闭环
+
+前置准备：已在项目 Compose 增加 `source-target` profile，固定 MySQL 8.0.36 和 Doris 2.1.11 FE/BE 镜像；待 VM 完成拉取、资源和网络检查后再启动。
+
+- [x] M5.1 Celery 应用工厂、Outbox Tool Broker、Capability/Replay Guard 消费和 SeaTunnel Adapter 提交/状态/取消端口。
+- [ ] M5.2 真实 SeaTunnel Zeta 联调、影子表/错误表和合成数据初始化。
+- [ ] M5.3 QualityContract、运行监督、原子 Swap、取消和回滚。
 
 交付：Celery Worker、SeaTunnel Adapter、影子表、错误表、QualityContract、RuntimeSupervision、Swap 和回滚。
 

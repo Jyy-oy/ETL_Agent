@@ -77,6 +77,8 @@
 | 429 | LLM、连接器或 API 配额受限 |
 | 500/503 | 内部错误或依赖不可用，返回 request ID |
 
+M4.4 已实现 Commit 与 ExecutionRun 查询：首次 Commit 返回 `201`，重复 Preparation 或相同 `Idempotency-Key` 返回 `200`；服务端会返回 `PREPARATION_FINGERPRINT_MISMATCH`、`APPROVALS_INCOMPLETE`、`CAPABILITY_ISSUE_FAILED` 等稳定错误码。Commit 响应只返回 `capability_token_digest`，不返回 Capability 原文。
+
 ## 5. 版本和兼容性
 
 新增字段默认可选；删除或改变语义必须经历兼容期。模型输出 Schema、EtlPlan、HOCON、QualityContract、RuntimeSupervisionContract 和事件 payload 都必须有版本号。破坏性 API 变更使用 `/api/v2` 或发布明确迁移窗口。

@@ -18,6 +18,7 @@ from etl_agent.api.file_assets import router as file_assets_router
 from etl_agent.api.generation import router as generation_router
 from etl_agent.api.health import router as health_router
 from etl_agent.api.middleware import RequestIdMiddleware
+from etl_agent.api.preparations import router as preparations_router
 from etl_agent.api.projects import router as projects_router
 from etl_agent.config import Settings, get_settings
 from etl_agent.infrastructure.database import create_session_factory
@@ -59,4 +60,5 @@ def create_app(
     app.include_router(file_assets_router)
     app.include_router(generation_router)
     app.include_router(projects_router)
+    app.include_router(preparations_router)
     return app

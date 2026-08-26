@@ -56,6 +56,7 @@
 - M2.2 Profile 只允许 information_schema 读取和限额样本查询，样本按字段名执行密码、Token、邮箱、手机号等脱敏后才落库。
 - M2.3 文件上传先执行大小和格式校验，MinIO 对象键使用服务端生成的项目隔离路径；PostgreSQL 只保存对象引用、哈希和脱敏 Profile，不保存原始文件内容。
 - Capability 私钥优先由 Vault Transit/KMS 托管；MVP PEM 文件只能用于本地开发。
+- M4.3/M4.4 已实现 Ed25519 Capability v1 的签名/验签、有效期检查、Commit 指纹绑定和 Redis Replay Guard；ExecutionRun 只保存令牌 SHA-256 摘要，Commit API 不返回原文。MVP Outbox 为保证 Worker 可恢复，暂保存内部 Capability 原文；生产部署必须改为 Vault/KMS 信封加密并限制数据库访问。
 - JWT 密钥、MinIO 密钥、百炼 API Key 和数据库密码必须按环境独立轮换。
 - Secret 轮换不应修改 PipelineVersion；连接器在运行时通过引用取得当前凭据。
 

@@ -1,1 +1,1 @@
-"""Celery task entry points placeholder for M5."""
+"""Celery Worker、Outbox Tool Broker 和 SeaTunnel Adapter。"""

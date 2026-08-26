@@ -90,6 +90,25 @@ class AgentRunStatus(StrEnum):
     VALIDATION_FAILED = "validation_failed"
 
 
+class ExecutionRunStatus(StrEnum):
+    """ExecutionRun 的最小运行状态集合，后续数据面会继续扩展。"""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELLED = "cancelled"
+
+
+class OutboxEventStatus(StrEnum):
+    """Transactional Outbox 事件的投递状态。"""
+
+    PENDING = "pending"
+    PUBLISHED = "published"
+    FAILED = "failed"
+
+
 class User(TimestampMixin, Base):
     __tablename__ = "users"
 
@@ -302,3 +321,164 @@ class GenerationAttempt(TimestampMixin, Base):
     validation_errors: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON, default=list, nullable=False
     )
+
+
+class Preparation(TimestampMixin, Base):
+    """保存 PDP 决策和不可变输入事实，Prepare 阶段不产生外部副作用。"""
+
+    __tablename__ = "preparations"
+    __table_args__ = (
+        Index("ix_preparations_project_status", "project_id", "status"),
+        Index("ix_preparations_version_created", "pipeline_version_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    pipeline_version_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("pipeline_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), default="approval_pending", nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(8), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    required_roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    resource_scope: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    runtime_budget: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    facts_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ApprovalRequest(TimestampMixin, Base):
+    """保存 Preparation 的独立职责槽审批事实和决定。"""
+
+    __tablename__ = "approval_requests"
+    __table_args__ = (
+        UniqueConstraint("preparation_id", "required_role", name="uq_approval_preparation_role"),
+        Index("ix_approval_requests_project_status", "project_id", "status"),
+        Index("ix_approval_requests_preparation_status", "preparation_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    preparation_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("preparations.id", ondelete="CASCADE"), nullable=False
+    )
+    required_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    approver_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    comment: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ExecutionRun(TimestampMixin, Base):
+    """保存 Commit 创建的执行事实，不允许反向修改冻结版本。"""
+
+    __tablename__ = "execution_runs"
+    __table_args__ = (
+        UniqueConstraint("preparation_id", name="uq_execution_runs_preparation"),
+        UniqueConstraint("idempotency_key", name="uq_execution_runs_idempotency_key"),
+        Index("ix_execution_runs_project_status", "project_id", "status"),
+        Index("ix_execution_runs_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    preparation_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("preparations.id", ondelete="RESTRICT"), nullable=False
+    )
+    pipeline_version_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("pipeline_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), default=ExecutionRunStatus.QUEUED, nullable=False
+    )
+    engine_name: Mapped[str] = mapped_column(String(64), default="seatunnel", nullable=False)
+    engine_job_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    artifact_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_token_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    committed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class OutboxEvent(TimestampMixin, Base):
+    """保存与 ExecutionRun 同事务创建的待投递命令。"""
+
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        UniqueConstraint("deduplication_key", name="uq_outbox_events_deduplication_key"),
+        Index("ix_outbox_events_status_next_attempt", "status", "next_attempt_at"),
+        Index("ix_outbox_events_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    deduplication_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default=OutboxEventStatus.PENDING, nullable=False
+    )
+    attempts: Mapped[int] = mapped_column(default=0, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # MVP 阶段用于 Worker 取回签发令牌；生产阶段应替换为 Vault/KMS 信封加密。
+    capability_token: Mapped[str] = mapped_column(Text, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EvidenceLedgerEvent(TimestampMixin, Base):
+    """以项目为边界保存追加式哈希链证据。"""
+
+    __tablename__ = "evidence_ledger_events"
+    __table_args__ = (
+        UniqueConstraint("project_id", "sequence_number", name="uq_evidence_project_sequence"),
+        UniqueConstraint("event_hash", name="uq_evidence_event_hash"),
+        Index("ix_evidence_ledger_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence_number: Mapped[int] = mapped_column(nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    actor_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    prev_event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_hash: Mapped[str] = mapped_column(String(64), nullable=False)

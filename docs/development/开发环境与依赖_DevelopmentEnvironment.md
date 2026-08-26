@@ -4,7 +4,7 @@
 
 - Python 3.12 或更高版本。
 - `uv` 管理 Python 环境、依赖和 `uv.lock`。
-- Docker Compose 只负责本地依赖：PostgreSQL 16、Redis 7、MinIO、Vault；SeaTunnel 按需启动。
+- Docker Compose 默认只负责 PostgreSQL 16、Redis 7、MinIO、Vault；SeaTunnel 使用 `data-plane` profile 按需启动，MySQL 8.0.36 和 Doris 2.1.11 FE/BE 使用 `source-target` profile 按需启动。
 - LLM 通过远端百炼 OpenAI 兼容接口访问，不安装本地模型和 GPU 依赖。
 - 前端预留 Vue 3 + Vite + TypeScript，尚未创建前端目录。
 
@@ -66,6 +66,8 @@ docker compose ps
 - `.env.example` 只保存变量名和开发占位值，可提交。
 - `.env` 只保存本机值，已忽略，不得提交真实 API Key、JWT 密钥或 Ed25519 私钥。
 - 百炼配置只填 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`；不要把 API Key 写入源码、测试固件或日志。
+- `LLM_MAX_PROMPT_BYTES` 默认限制脱敏 Prompt 大小；`LLM_REAL_SMOKE_ENABLED=false` 默认关闭真实百炼测试，只有使用非生产密钥和脱敏数据时才临时开启。
+- `CHECKPOINT_INTEGRATION_ENABLED=false` 默认关闭 VM PostgreSQL Checkpoint 测试；依赖健康后可执行 `CHECKPOINT_INTEGRATION_ENABLED=true uv run pytest tests/integration/test_m3_runtime.py -m integration`。
 - `CAPABILITY_PRIVATE_KEY_PATH` 指向 `secrets/` 下的忽略文件；生产环境优先使用 Vault Transit/KMS，而不是挂载 PEM 文件。
 
 ## 6. 推荐目录约定
@@ -100,4 +102,4 @@ uv run pytest
 uv lock --check
 ```
 
-涉及外部依赖的测试使用 respx 或 fake adapter；涉及 PostgreSQL/Redis/MinIO 的集成测试必须明确标记，并在 Compose 服务健康后运行。不要在单元测试中调用真实百炼或真实业务数据库。
+涉及外部依赖的测试使用 respx 或 fake adapter；涉及 PostgreSQL/Redis/MinIO 的集成测试必须明确标记，并在 Compose 服务健康后运行。真实百炼测试还需要 `LLM_REAL_SMOKE_ENABLED=true`，不要在普通单元测试中调用真实百炼或真实业务数据库。

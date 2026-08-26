@@ -1,1 +1,1 @@
-"""Policy, capability, broker, replay, and ledger boundary placeholder for M4."""
+"""Harness 的策略、授权、幂等投递和审计边界。"""

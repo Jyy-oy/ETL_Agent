@@ -59,6 +59,9 @@ select = ["E", "F", "I", "B", "UP"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: 需要 Compose 或远端服务的显式集成测试",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/etl_agent"]

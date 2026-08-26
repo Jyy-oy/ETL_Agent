@@ -54,6 +54,10 @@ def test_m1_auth_and_project_routes_are_registered() -> None:
     assert "/api/v1/versions/{version_id}/generation" in paths
     assert "/api/v1/agent-runs/{run_id}/answers" in paths
     assert "/api/v1/versions/{version_id}/design" in paths
+    assert "/api/v1/versions/{version_id}/prepare" in paths
+    assert "/api/v1/approval-requests/{approval_id}/decisions" in paths
+    assert "/api/v1/preparations/{preparation_id}/commit" in paths
+    assert "/api/v1/execution-runs/{execution_id}" in paths
 
 
 def test_role_assignment_rejects_checker_overlap() -> None:

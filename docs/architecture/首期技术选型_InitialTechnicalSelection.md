@@ -44,7 +44,7 @@
 
 - 百炼 LLM：通过 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 调用远端服务。
 - 生产级 Vault、KMS/HSM、SSO、监控平台：本地只保留开发替身或接口契约。
-- 业务源库和目标库：首条演示链路可使用独立 MySQL/Doris 实例；不把它们默认塞入基础设施 Compose，避免掩盖真实连接权限和数据规模问题。
+- 业务源库和目标库：首条演示链路使用 `source-target` Compose profile 提供 MySQL 8.0.36 和 Doris 2.1.11 FE/BE 合成实例；不加入默认基础设施启动，避免未准备时占用大量资源。
 
 ## 4. 网络与地址约定
 

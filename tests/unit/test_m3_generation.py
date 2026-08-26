@@ -13,7 +13,11 @@ from etl_agent.domain.generation import (
     RuntimeBudget,
     cap_runtime_budget,
 )
-from etl_agent.infrastructure.llm import FakeLLMProvider, OpenAICompatibleProvider
+from etl_agent.infrastructure.llm import (
+    FakeLLMProvider,
+    LLMProviderError,
+    OpenAICompatibleProvider,
+)
 from etl_agent.workflows.graph import run_generation_workflow
 
 
@@ -171,6 +175,15 @@ async def test_openai_compatible_provider_returns_structured_json_without_loggin
         llm_max_retries=0,
     )
     request, _ = _request()
+    request = request.model_copy(
+        update={
+            "source_profiles": [
+                request.source_profiles[0].model_copy(
+                    update={"redacted_sample": {"password": "should-not-leak"}}
+                )
+            ]
+        }
+    )
     response = await OpenAICompatibleProvider(settings).generate_structured(
         request, {"type": "object"}
     )
@@ -178,3 +191,59 @@ async def test_openai_compatible_provider_returns_structured_json_without_loggin
     assert response.payload == {"ok": True}
     assert route.called
     assert route.calls[0].request.headers["Authorization"] == "Bearer test-secret-key"
+    assert b"should-not-leak" not in route.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_provider_retries_transient_upstream_failure() -> None:
+    """验证 503 只触发有限重试，并在恢复后返回结构化结果。"""
+    route = respx.post("https://bailian.example/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(503, json={"error": "busy"}),
+            httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+            ),
+        ]
+    )
+    settings = Settings(
+        _env_file=None,
+        llm_base_url="https://bailian.example/v1",
+        llm_api_key="test-secret-key",
+        llm_model="qwen-test",
+        llm_request_timeout_seconds=5,
+        llm_max_retries=1,
+    )
+    request, _ = _request()
+
+    response = await OpenAICompatibleProvider(settings).generate_structured(
+        request, {"type": "object"}
+    )
+
+    assert response.payload == {"ok": True}
+    assert response.attempts == 2
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_provider_rejects_oversized_prompt_before_network_call() -> None:
+    """验证脱敏 Prompt 超过上限时不会发起远端请求。"""
+    route = respx.post("https://bailian.example/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+    settings = Settings(
+        _env_file=None,
+        llm_base_url="https://bailian.example/v1",
+        llm_api_key="test-secret-key",
+        llm_model="qwen-test",
+        llm_max_prompt_bytes=64,
+    )
+    request, _ = _request()
+
+    with pytest.raises(LLMProviderError) as error:
+        await OpenAICompatibleProvider(settings).generate_structured(request, {"type": "object"})
+
+    assert error.value.code == "LLM_PROMPT_TOO_LARGE"
+    assert not route.called
