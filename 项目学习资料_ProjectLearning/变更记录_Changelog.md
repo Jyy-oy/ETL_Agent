@@ -1,5 +1,40 @@
 # ETL-Agent 学习资料与工程沉淀变更记录
 
+## 2026-08-27：MySQL CAST 方言兼容与 SeaTunnel 提交错误可观测性
+
+- 根因：真实数据面编译器把 Profile 的通用类型 `BIGINT` 直接拼入 MySQL `CAST`，而 MySQL 不支持 `CAST(... AS BIGINT)`；源、目标类型一致时也会生成没有意义的 CAST。
+- 修复：同类型转换归一化为直接映射；整数、字符串、布尔等类型转换改用 MySQL 支持的 `SIGNED`、`CHAR` 等类型；提示词增加同类型不转换和方言边界约束。
+- 可观测性：SeaTunnel 提交/状态 HTTP 失败保留状态码和脱敏摘要，ExecutionRun/Outbox 仍不记录密码、Token 或完整敏感载荷。
+- 验证：新增同类型 CAST 回归测试、类型不一致的 MySQL 方言测试和上游错误脱敏测试；实际 VM MySQL 验证 `CAST(... AS BIGINT)` 失败、合法查询成功。
+
+## 2026-08-27：Agent 阶段产物链和百炼调用证据
+
+- 控制台：Pipeline Studio 将 LangGraph 的每个阶段展示为“上游输入、本阶段动作、已产出、下游用途”，状态只依据后端 `AgentRun.node_trace`，并在终态明确显示候选、校验、HOCON 和澄清结果。
+- 证据：Agent 面板补充真实节点进度、Provider/模型、候选请求次数和上下游摘要，帮助 Maker 在 Prepare 前审查模型产物。
+- LLM：OpenAI-compatible Provider 增加 `llm_request_started`、`llm_request_retry`、`llm_request_completed`、`llm_request_failed`、`llm_request_skipped` 安全日志；仅记录操作、模型、耗时、重试次数、Prompt 大小和响应摘要，不记录密钥、Prompt、样本或响应正文。
+- 文档：用户手册补充端到端产物链、复杂需求能力边界和百炼调用排查；开发手册补充 Agent 阶段契约、调用路径和当前完成度矩阵。
+
+## 2026-08-26：Windows Celery Worker LangGraph Checkpoint 事件循环修复
+
+- 根因：Celery Worker 的同步任务入口使用普通 `asyncio.run()`，Windows 会创建 `ProactorEventLoop`；LangGraph PostgreSQL Checkpoint 底层的 psycopg 异步连接不支持该事件循环，任务在第一个节点回调前失败，`AgentRun.node_trace` 保持为空。
+- 修复：Worker 统一通过 `_run_async` 运行异步任务；Windows 使用 `asyncio.Runner(loop_factory=asyncio.SelectorEventLoop)`，Outbox、生成、监督和 Beat 任务均遵循同一事件循环约束。
+- 运维：修改后必须重启 Celery Worker 和 Beat；FastAPI 终端只显示 HTTP 请求，Agent 运行异常需查看 Worker 终端和 `AgentRun.error_code/error_detail`。
+- 验证：Checkpoint 初始化连接 `192.168.181.128:5432/etl_agent` 成功；事件循环回归测试、M3 生成测试、Ruff 和 Mypy 通过。
+
+## 2026-08-26：订单同步转换编译与候选审查对话
+
+- 处理：真实编译器已支持 Profile 类型白名单 CAST 和数值比较 FILTER，过滤条件进入 MySQL 源查询；`mask/fill_null` 与行级错误表写入仍列为后续增强。历史失败运行不会自动重试，需要生成新版本后重新 Prepare/审批/Commit。
+- 细化：错误表名称改为读取冻结 `QualityContract.error_table_suffix`，并对后缀和 Doris 64 字符标识符长度执行确定性校验；前端补齐百炼 Provider 细分错误码的中文提示。
+- 控制台：AgentRun 完成后展示结构化 EtlPlan/HOCON，并新增持久化审查对话；对话通过 Celery 异步回答，不能改变冻结版本。
+- 验证：新增编译器安全条件测试、兼容 LLM 对话测试和 `0013_agent_run_chat` 迁移；全量测试、Ruff、Mypy、前端构建通过。
+
+## 2026-08-26：Agent 生成进度、澄清交互和业务可读性优化
+
+- 内容：新增异步 AgentRun 生成接口和 `agent_runs` 进度字段；Celery Worker 按 LangGraph 节点持久化状态、澄清问题、校验问题和修复次数，并输出 `agent_generation_*`、`outbox_dispatch_*`、`execution_supervision_*` 结构化日志。
+- 前端：Pipeline Studio 改为轮询真实 AgentRun，展示节点轨迹、模型、校验结果和澄清对话；连接页增加 VM MySQL/Doris 预设和 Profile 表名自动建议；审批、运行中心使用 Pipeline/版本名称，风险区明确所需 Checker。
+- 兼容：旧同步 `/generation` 接口保留；控制台使用 `/generation/async`，澄清答案也以 `202` 重新排队同一 AgentRun；需要先执行 `uv run alembic upgrade head` 并重启 FastAPI、Worker。
+- 验证：迁移 `0012_agent_run_progress` 已应用；非集成测试、Ruff、Mypy、前端构建通过。
+
 ## 2026-08-26：真实数据面单表 Profile 使用提示和执行错误详情
 
 - 根因：Doris 最近 Profile 同时包含 `orders_current`、`orders_current__smoke` 两张表，真实运行编译器按首期约束拒绝多表目标 Profile，ExecutionRun 记录为 `OUTBOX_DISPATCH_FAILED`。
@@ -370,3 +405,13 @@
 ## 记录规则
 
 后续每次重要修复、优化、配置变更或学习结论按“级别、类型、来源、根因与解决过程、涉及文件”记录。未解决事项单独标记为待处理，不把失败假设写成完成结论。
+
+## 2026-08-27：A-F 真实验收与数据面边界修复
+
+- 真实验收：按现有《项目测试手册》的 U-001～U-008 矩阵执行。VM 上 MySQL/Doris/SeaTunnel/Vault 全部通过健康检查；百炼 `qwen3.7-max` 实际完成订单全量生成和审查对话；订单直接映射、过滤、Prepare、Checker 审批、Commit、SeaTunnel、质量、原子 Swap、回滚链路成功，10,000 条合规数据写入 Doris。
+- 问题与修复：历史候选把 FILTER 参数写成 `expression`，运行时只读取 `condition`；编译器现在兼容两种格式，新提示词统一要求 `condition`。历史候选还可能把重命名写成嵌套 `TransformRule`，校验层仅在结构无歧义时归一化为 `rename/cast` 字符串，并在提示词中固定映射格式。
+- 问题与修复：FILTER 之前只过滤合规行，拒绝行未计数且错误表为空。现在监督阶段按编译器生成的反向 SELECT 从 MySQL 回收拒绝行，参数化写入 Doris 错误表并更新 `rejected_records`；实测插入 5 条 `amount=-1` 后，错误表有 5 行、拒绝率约 0.05%，质量通过后发布。
+- 问题与修复：Maker 自审批之前先触发职责不足错误，用户看不到明确原因；现在先确认项目成员并返回 `SELF_APPROVAL_FORBIDDEN`，再校验 Checker 职责槽。
+- 边界记录：增量澄清可以真实恢复并再次调用百炼，但参数化水位执行尚未实现；`mask/fill_null`、Join、聚合、CDC/调度仍应在后续数据面里程碑实现，不得当作本轮验收通过项。
+- 流程优化：对上述确定性不支持能力，生成门禁现在直接终止，不再进入 `RepairNode`；新增回归测试确认只产生一次候选调用，并保留清晰的校验错误。
+- 质量修复：过滤条件反向查询补充 `IS NULL` 分支，避免过滤字段为 NULL 时因 MySQL 三值逻辑既未写入目标表也未进入错误表；新增 SQL 回归断言。

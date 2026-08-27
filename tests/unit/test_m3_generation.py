@@ -19,6 +19,7 @@ from etl_agent.infrastructure.llm import (
     OpenAICompatibleProvider,
 )
 from etl_agent.workflows.graph import run_generation_workflow
+from etl_agent.workflows.validation import parse_plan_payload
 
 
 def _request() -> tuple[GenerationRequest, dict[str, object]]:
@@ -84,6 +85,37 @@ async def test_valid_candidate_completes_and_records_nodes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generation_progress_callback_receives_each_node() -> None:
+    """验证流式执行会按节点顺序回调，供控制台展示真实 Agent 进度。"""
+    request, candidate = _request()
+    progress: list[tuple[str, list[str]]] = []
+
+    async def collect(node_name: str, state: dict[str, object]) -> None:
+        """收集节点和累计轨迹，模拟 Worker 的持久化回调。"""
+        trace = state.get("node_trace", [])
+        progress.append(
+            (node_name, [str(item) for item in trace] if isinstance(trace, list) else [])
+        )
+
+    result = await run_generation_workflow(
+        request,
+        FakeLLMProvider([candidate]),
+        progress_callback=collect,
+    )
+
+    assert result.status == "completed"
+    assert [node for node, _ in progress] == [
+        "intent_parse",
+        "profile_enrichment",
+        "candidate_generation",
+        "schema_validation",
+        "hocon_compile",
+        "deterministic_gate",
+    ]
+    assert progress[-1][1] == result.node_trace
+
+
+@pytest.mark.asyncio
 async def test_missing_profiles_interrupts_without_calling_provider() -> None:
     """验证缺少源/目标 Profile 时进入澄清中断且不触发 LLM。"""
     provider = FakeLLMProvider([])
@@ -134,6 +166,40 @@ async def test_model_cannot_expand_runtime_budget() -> None:
     assert any(issue.code == "BUDGET_EXCEEDED" for issue in result.validation_issues)
 
 
+@pytest.mark.asyncio
+async def test_unsupported_data_plane_request_is_rejected_before_freezing() -> None:
+    """验证未实现的复杂语义不会被模型静默降级为可执行版本。"""
+    request, candidate = _request()
+    request = request.model_copy(
+        update={
+            "business_request": "每天按更新时间做增量同步并脱敏手机号",
+            "answers": {"incremental_field": "updated_at"},
+        }
+    )
+    result = await run_generation_workflow(request, FakeLLMProvider([candidate]), max_repairs=0)
+
+    assert result.status == "validation_failed"
+    assert result.plan is None
+    assert any(issue.code == "UNSUPPORTED_DATA_PLANE_FEATURE" for issue in result.validation_issues)
+
+
+@pytest.mark.asyncio
+async def test_unsupported_data_plane_request_does_not_trigger_repair() -> None:
+    """验证确定性能力边界不会额外触发无效的修复模型调用。"""
+    request, candidate = _request()
+    request = request.model_copy(update={"business_request": "按更新时间做增量同步并对 email 脱敏"})
+    request = request.model_copy(update={"answers": {"incremental_field": "updated_at"}})
+    provider = FakeLLMProvider([candidate])
+
+    result = await run_generation_workflow(request, provider)
+
+    assert result.status == "validation_failed"
+    assert result.plan is None
+    assert result.repair_count == 0
+    assert provider.calls == 1
+    assert "RepairNode" not in result.node_trace
+
+
 def test_runtime_budget_is_capped_by_server_limit() -> None:
     """验证 API 使用的预算裁剪函数不会接受超过服务端上限的值。"""
     capped = cap_runtime_budget(
@@ -143,6 +209,24 @@ def test_runtime_budget_is_capped_by_server_limit() -> None:
 
     assert capped.max_input_records == RuntimeBudget().max_input_records
     assert capped.max_output_bytes == RuntimeBudget().max_output_bytes
+
+
+def test_nested_mapping_transform_is_normalized_for_legacy_llm_output() -> None:
+    """验证历史模型把 rename 写成嵌套对象时可安全归一化为字符串枚举。"""
+    request, candidate = _request()
+    candidate["field_mappings"] = [
+        {
+            "source_field": "id",
+            "target_field": "id",
+            "transform": {"operation": "rename", "source_fields": ["id"]},
+        },
+        candidate["field_mappings"][1],
+    ]
+    plan, issues = parse_plan_payload(candidate)
+
+    assert not issues
+    assert plan is not None
+    assert plan.field_mappings[0].transform == "rename"
 
 
 @pytest.mark.asyncio
@@ -158,8 +242,11 @@ async def test_invalid_hocon_is_rejected() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_openai_compatible_provider_returns_structured_json_without_logging_secret() -> None:
+async def test_openai_compatible_provider_returns_structured_json_without_logging_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """验证 OpenAI-compatible Provider 使用 Bearer 请求并解析结构化 JSON。"""
+    caplog.set_level("INFO")
     route = respx.post("https://bailian.example/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
@@ -192,6 +279,9 @@ async def test_openai_compatible_provider_returns_structured_json_without_loggin
     assert route.called
     assert route.calls[0].request.headers["Authorization"] == "Bearer test-secret-key"
     assert b"should-not-leak" not in route.calls[0].request.content
+    assert "llm_request_started" in caplog.text
+    assert "llm_request_completed" in caplog.text
+    assert "test-secret-key" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -247,3 +337,31 @@ async def test_provider_rejects_oversized_prompt_before_network_call() -> None:
 
     assert error.value.code == "LLM_PROMPT_TOO_LARGE"
     assert not route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_compatible_provider_answers_candidate_review_question() -> None:
+    """验证候选审查对话调用兼容接口并限制返回内容。"""
+    route = respx.post("https://bailian.example/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "email 未进入字段映射。"}}]},
+        )
+    )
+    settings = Settings(
+        _env_file=None,
+        llm_base_url="https://bailian.example/v1",
+        llm_api_key="test-secret-key",
+        llm_model="qwen-test",
+        llm_request_timeout_seconds=5,
+        llm_max_retries=0,
+    )
+
+    answer = await OpenAICompatibleProvider(settings).answer_question(
+        "请检查 email 是否写入目标表？",
+        {"plan": {"field_mappings": []}, "hocon": "field_mappings = []"},
+    )
+
+    assert answer == "email 未进入字段映射。"
+    assert route.called

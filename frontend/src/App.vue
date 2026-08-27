@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 type AnyRecord = Record<string, unknown>
 type Project = { id: string; code: string; name: string }
@@ -18,10 +18,20 @@ type Connection = {
 type Profile = { id: string; connection_id: string; fingerprint: string; estimated_row_count?: number; schema_json?: AnyRecord; schema_snapshot?: AnyRecord }
 type ProfileOption = { id: string; label: string }
 type Pipeline = { id: string; code: string; name: string; status: string }
-type Version = { id: string; version_number: number; status: string; immutable: boolean; artifact_digest?: string }
+type Version = { id: string; pipeline_id: string; version_number: number; status: string; immutable: boolean; artifact_digest?: string }
 type Preparation = { id: string; pipeline_version_id: string; status: string; risk_level: string; required_roles: string[]; approval_requests: Approval[]; expires_at: string }
 type Approval = { id: string; required_role: string; status: string; decision?: string; comment?: string }
-type Execution = { id: string; preparation_id: string; status: string; quality_status: string; publish_status: string; rollback_status: string; metrics: AnyRecord; error_code?: string; error_detail?: string }
+type Execution = { id: string; preparation_id: string; pipeline_version_id: string; status: string; quality_status: string; publish_status: string; rollback_status: string; metrics: AnyRecord; error_code?: string; error_detail?: string }
+type AgentPlan = {
+  source: { connection_id: string; profile_id: string }
+  target: { connection_id: string; profile_id: string }
+  field_mappings: { source_field: string; target_field: string; transform?: string | null }[]
+  transforms: { operation: string; source_fields: string[]; target_field?: string | null; parameters: AnyRecord }[]
+  quality_contract: { required_fields: string[]; max_rejection_rate: number; error_table_suffix: string }
+  runtime_budget: AnyRecord
+  hocon: string
+}
+type AgentMessage = { role: 'user' | 'assistant'; content: string; created_at: string }
 type BenchmarkReport = {
   benchmark_id: string
   status: string
@@ -37,6 +47,35 @@ type BenchmarkReport = {
   environment: string
   started_at: string
   completed_at: string
+}
+type AgentRun = {
+  id: string
+  thread_id: string
+  status: string
+  pipeline_version_id: string
+  repair_count: number
+  node_trace: string[]
+  attempts: AnyRecord[]
+  provider?: string | null
+  model?: string | null
+  error_code?: string | null
+  error_detail?: string | null
+  clarification_questions: { key: string; question: string; required: boolean }[]
+  validation_issues: { code: string; message: string; path: (string | number)[] }[]
+  chat_status: string
+  chat_messages: AgentMessage[]
+  chat_error_code?: string | null
+  chat_error_detail?: string | null
+  plan?: AgentPlan | null
+}
+type GenerationStep = {
+  key: string
+  label: string
+  node: string
+  upstream: string
+  action: string
+  artifact: string
+  downstream: string
 }
 
 const token = ref(localStorage.getItem('etl_agent_token') ?? '')
@@ -61,6 +100,11 @@ const preparations = ref<Preparation[]>([])
 const executions = ref<Execution[]>([])
 const benchmarkReport = ref<BenchmarkReport | null>(null)
 const benchmarkHistory = ref<BenchmarkReport[]>([])
+const pipelineVersionLabels = ref<Record<string, string>>({})
+const generationRun = ref<AgentRun | null>(null)
+const clarificationAnswers = ref<Record<string, string>>({})
+const chatQuestion = ref('')
+let generationPollTimer: number | null = null
 
 // 开发机通过 VM 暴露的端口访问合成 MySQL，不能使用浏览器所在机器的 localhost。
 const syntheticMysqlHost = import.meta.env.VITE_SYNTHETIC_MYSQL_HOST ?? '192.168.181.128'
@@ -78,11 +122,290 @@ const selectedPreparation = computed(() => preparations.value.find((item) => ite
 const profileOptions = computed<ProfileOption[]>(() => connections.value.flatMap((connection) => {
   const profile = profiles.value[connection.id]
   if (!profile) return []
+  const tableNames = profileTableNamesFromProfile(profile)
   return [{
     id: profile.id,
-    label: `${connection.name} · ${profile.id.slice(0, 8)}... · ${profile.estimated_row_count ?? '未知'} 行`,
+    label: `${connection.name} · ${tableNames.join(', ') || '未识别表'} · ${profile.estimated_row_count ?? '未知'} 行`,
   }]
 }))
+
+const generationTerminalStatuses = new Set(['completed', 'needs_clarification', 'failed', 'validation_failed'])
+const generationSteps: GenerationStep[] = [
+  {
+    key: 'intent_parse', label: '意图解析', node: 'IntentParseNode',
+    upstream: '业务需求、已选择的源/目标 Profile 引用',
+    action: '检查关键参数，识别是否需要人工澄清',
+    artifact: '澄清问题清单，或可继续生成的需求边界',
+    downstream: 'Profile 上下文整理使用已确认的需求边界',
+  },
+  {
+    key: 'profile_enrichment', label: 'Profile 上下文整理', node: 'ProfileEnrichmentNode',
+    upstream: '已授权 Profile 的字段、类型、指纹和脱敏样本摘要',
+    action: '整理最小脱敏上下文，不读取海量业务数据',
+    artifact: '供模型使用的源/目标 Schema 摘要',
+    downstream: '候选生成将摘要和结构化 Schema 一起提交给 LLM',
+  },
+  {
+    key: 'candidate_generation', label: 'LLM 候选生成', node: 'CandidateGenerationNode',
+    upstream: '需求上下文、Profile 摘要、EtlPlan JSON Schema',
+    action: '调用配置的远端百炼 OpenAI-compatible 接口生成候选',
+    artifact: '结构化 EtlPlan 候选和响应摘要指纹',
+    downstream: '结构化校验检查字段、转换、质量规则和预算',
+  },
+  {
+    key: 'schema_validation', label: '结构化校验', node: 'SchemaValidationNode',
+    upstream: 'LLM 候选 JSON',
+    action: '执行 Pydantic、字段引用、Profile 对齐和预算校验',
+    artifact: '通过的 EtlPlan，或带路径的校验问题',
+    downstream: '合法候选进入 HOCON 编译，非法候选进入有界修复',
+  },
+  {
+    key: 'hocon_compile', label: 'HOCON 编译', node: 'HoconCompileNode',
+    upstream: '通过结构化校验的 EtlPlan/HOCON 文本',
+    action: '解析 SeaTunnel HOCON，确认执行文件语法可读',
+    artifact: '可交给数据面的 HOCON 配置对象',
+    downstream: '确定性门禁决定是否允许冻结版本',
+  },
+  {
+    key: 'deterministic_gate', label: '确定性门禁', node: 'DeterministicGateNode',
+    upstream: '全部结构化和 HOCON 校验结果',
+    action: '由代码而非模型决定通过、修复或停止',
+    artifact: '完成状态，或最终拒绝原因',
+    downstream: '通过后冻结 PipelineVersion，交给 Prepare/审批',
+  },
+  {
+    key: 'repair', label: '有界修复', node: 'RepairNode',
+    upstream: '上一轮候选的确定性校验问题',
+    action: '增加修复计数并重新请求候选，受最大次数限制',
+    artifact: '下一轮候选请求上下文',
+    downstream: '返回 LLM 候选生成，不允许绕过门禁',
+  },
+  {
+    key: 'human_interrupt', label: '等待人工澄清', node: 'HumanInterruptNode',
+    upstream: '缺少关键输入，或有界修复后仍不满足门禁',
+    action: '暂停工作流并等待 Maker 提交答案',
+    artifact: '可恢复的澄清问题和 PostgreSQL Checkpoint',
+    downstream: '答案提交后复用同一 thread 继续生成',
+  },
+]
+
+function shortId(value: string): string {
+  // 长 UUID 只作为次要定位信息展示，页面主标题优先使用业务名称。
+  return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value
+}
+
+function profileTableNamesFromProfile(profile: Profile): string[] {
+  // 从 Profile 的按表 Schema 快照中提取表名，供选择器和表名建议使用。
+  const snapshot = profile.schema_snapshot ?? profile.schema_json ?? {}
+  const tables = snapshot.tables
+  if (!Array.isArray(tables)) return []
+  return tables
+    .filter((table): table is AnyRecord => typeof table === 'object' && table !== null)
+    .map((table) => String(table.name ?? ''))
+    .filter(Boolean)
+}
+
+function connectionTableNames(connection: Connection): string[] {
+  // 返回当前连接最近 Profile 中的表名；没有 Profile 时返回空列表。
+  const profile = profiles.value[connection.id]
+  return profile ? profileTableNamesFromProfile(profile) : []
+}
+
+function applyConnectionPreset(kind: 'mysql' | 'doris'): void {
+  // 使用 VM 合成数据面的固定参数填充表单，减少重复手工输入和 localhost 误配。
+  if (kind === 'mysql') {
+    connectionForm.value = {
+      code: 'synthetic_mysql', name: '合成 MySQL', connection_type: 'mysql',
+      host: syntheticMysqlHost, port: 3306, database_name: 'etl_demo',
+      username: 'etl_demo', secret_ref: 'secret/data/etl-agent/mysql',
+    }
+  } else {
+    connectionForm.value = {
+      code: 'synthetic_doris', name: '合成 Doris', connection_type: 'doris',
+      host: syntheticMysqlHost, port: 9030, database_name: 'etl_demo_dw',
+      username: 'root', secret_ref: 'secret/data/etl-agent/doris',
+    }
+  }
+  editingConnectionId.value = null
+}
+
+async function loadPipelineVersionLabels(pipelineRows: Pipeline[]): Promise<void> {
+  // 一次加载项目内版本并构造“Pipeline 名称（编码）/ vN”可读标签，页面不再暴露孤立 UUID。
+  const labels: Record<string, string> = {}
+  await Promise.all(pipelineRows.map(async (pipeline) => {
+    try {
+      const rows = await api<Version[]>(`/api/v1/pipelines/${pipeline.id}/versions`)
+      for (const version of rows) labels[version.id] = `${pipeline.name}（${pipeline.code}）/ v${version.version_number}`
+    } catch {
+      // 单个 Pipeline 版本读取失败不阻塞其他项目数据加载。
+    }
+  }))
+  pipelineVersionLabels.value = labels
+}
+
+function requiredRoleLabel(roles: string[]): string {
+  // 将 PDP 返回的审批槽转换为明确的 Checker 数量和职责说明。
+  return roles.length ? roles.map(roleLabel).join('、') : '无需额外审批'
+}
+
+function generationNodeLabel(node: string): string {
+  // 将后端 LangGraph 节点名转换为面向用户的中文步骤名称。
+  return generationSteps.find((step) => step.node === node || step.key === node)?.label ?? node
+}
+
+function generationStepState(step: { node: string }, run: AgentRun): string {
+  // 只依据后端 node_trace 判断步骤状态，不在前端猜测或伪造进度。
+  if (run.node_trace[run.node_trace.length - 1] === step.node && run.status === 'running') return 'current'
+  if (run.node_trace.includes(step.node)) return 'done'
+  return 'pending'
+}
+
+function generationStepClass(step: { node: string }, run: AgentRun): string {
+  // 统一返回步骤样式状态，便于模板保持简洁。
+  return `agent-step-${generationStepState(step, run)}`
+}
+
+function generationStepStatusLabel(step: GenerationStep, run: AgentRun): string {
+  // 将真实节点轨迹转换为阶段状态，帮助用户区分排队、处理中和已完成。
+  const state = generationStepState(step, run)
+  if (state === 'done') return '已完成'
+  if (state === 'current') return '处理中'
+  return '待执行'
+}
+
+function generationStageArtifact(step: GenerationStep, run: AgentRun): string {
+  // 只在节点真实执行后补充运行快照，未执行阶段明确显示“待执行”。
+  if (generationStepState(step, run) === 'pending') return '待执行，尚无产物'
+  if (step.key === 'intent_parse') {
+    return run.clarification_questions.length
+      ? `已发现 ${run.clarification_questions.length} 个待澄清项`
+      : '关键需求参数已确认，可以继续生成'
+  }
+  if (step.key === 'candidate_generation') {
+    const attempts = run.attempts.length ? `，累计 ${run.attempts.length} 次候选请求` : ''
+    const provider = run.provider && run.model ? `（${run.provider} / ${run.model}）` : ''
+    return `候选 JSON 已${run.plan ? '通过后续校验' : '返回或正在校验'}${provider}${attempts}`
+  }
+  if (step.key === 'schema_validation') {
+    return run.validation_issues.length
+      ? `发现 ${run.validation_issues.length} 个校验问题`
+      : run.plan ? 'EtlPlan 结构和引用已通过' : '已执行结构化校验'
+  }
+  if (step.key === 'hocon_compile') return run.plan ? 'HOCON 已编译并展示在候选结果中' : 'HOCON 编译未产出可用配置'
+  if (step.key === 'deterministic_gate') {
+    return run.status === 'completed' ? '确定性门禁通过，版本已冻结' : '门禁结果已记录，需查看校验问题'
+  }
+  if (step.key === 'repair') return `已触发第 ${run.repair_count} 次有界修复`
+  if (step.key === 'human_interrupt') return run.clarification_questions.length ? '等待 Maker 补充澄清答案' : '工作流已暂停，等待人工处理'
+  return step.artifact
+}
+
+function generationProgressText(run: AgentRun): string {
+  // 用已持久化的节点数量给出可解释进度，不把它伪装成时间百分比。
+  const completed = new Set(run.node_trace).size
+  return `${completed}/${generationSteps.length} 个阶段已记录`
+}
+
+function generationUpstreamText(run: AgentRun): string {
+  // 汇总当前节点之前已经落库的阶段，明确说明它们将作为当前输入。
+  const completed = generationSteps
+    .filter((step) => generationStepState(step, run) === 'done')
+    .map((step) => step.label)
+  return completed.length ? completed.join('、') : '尚无已完成阶段，任务正在排队'
+}
+
+function generationCurrentDetail(run: AgentRun): GenerationStep | undefined {
+  // 找到最新正在执行的节点，终态时返回最后一个真实节点供用户回看。
+  const lastNode = run.node_trace[run.node_trace.length - 1]
+  return generationSteps.find((step) => step.node === lastNode)
+}
+
+function generationCurrentArtifact(run: AgentRun): string {
+  // 模板不直接处理可选对象，统一返回当前节点已经落库的产物说明。
+  const step = generationCurrentDetail(run)
+  return step ? generationStageArtifact(step, run) : '任务排队中，尚无产物'
+}
+
+function currentGenerationStep(run: AgentRun): string {
+  // 用最近一次持久化节点给出当前工作位置，尚未收到节点时显示排队中。
+  const lastNode = run.node_trace[run.node_trace.length - 1]
+  if (!lastNode) return '排队中'
+  return generationTerminalStatuses.has(run.status) ? '已结束' : generationNodeLabel(lastNode)
+}
+
+function stopGenerationPolling(): void {
+  // 页面卸载或 AgentRun 进入终态时清理轮询定时器，避免后台残留请求。
+  if (generationPollTimer !== null) {
+    window.clearTimeout(generationPollTimer)
+    generationPollTimer = null
+  }
+}
+
+async function pollGenerationRun(runId: string): Promise<void> {
+  // 轮询持久化 AgentRun 快照，把真实节点和澄清状态同步到 Studio。
+  try {
+    const run = await api<AgentRun>(`/api/v1/agent-runs/${runId}`)
+    generationRun.value = run
+    const generationDone = generationTerminalStatuses.has(run.status)
+    const chatBusy = ['queued', 'running'].includes(run.chat_status)
+    if (generationDone && !chatBusy) {
+      stopGenerationPolling()
+      if (run.status === 'completed') notify('Agent 生成完成，可继续 Prepare')
+      else if (run.status === 'needs_clarification') notify('Agent 需要补充澄清信息')
+      else notify(`Agent 生成${statusLabel(run.status)}`)
+      await loadProjectData()
+      return
+    }
+    generationPollTimer = window.setTimeout(() => void pollGenerationRun(runId), 1200)
+  } catch (error) {
+    stopGenerationPolling()
+    notify(error instanceof Error ? error.message : 'Agent 状态读取失败')
+  }
+}
+
+async function answerClarification(): Promise<void> {
+  // 将 Maker 的澄清答案交给原 AgentRun，服务端使用同一 thread 恢复工作流。
+  if (!generationRun.value) return
+  const answers = Object.fromEntries(
+    Object.entries(clarificationAnswers.value).filter(([, value]) => value.trim()),
+  )
+  if (!Object.keys(answers).length) {
+    notify('请先填写至少一个澄清答案')
+    return
+  }
+  try {
+    const run = await api<AgentRun>(`/api/v1/agent-runs/${generationRun.value.id}/answers`, {
+      method: 'POST', body: JSON.stringify({ answers }),
+    })
+    generationRun.value = run
+    clarificationAnswers.value = {}
+    if (!generationTerminalStatuses.has(run.status)) void pollGenerationRun(run.id)
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '澄清答案提交失败')
+  }
+}
+
+async function chatWithAgent(): Promise<void> {
+  // 将候选审查问题异步交给 Worker，前端继续轮询同一 AgentRun 的对话状态。
+  if (!generationRun.value || !chatQuestion.value.trim()) return
+  try {
+    const run = await api<AgentRun>(`/api/v1/agent-runs/${generationRun.value.id}/chat`, {
+      method: 'POST', body: JSON.stringify({ message: chatQuestion.value.trim() }),
+    })
+    generationRun.value = run
+    chatQuestion.value = ''
+    notify('审查问题已提交，Agent 正在回答')
+    void pollGenerationRun(run.id)
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '审查问题提交失败')
+  }
+}
+
+function formatChatTime(value: string): string {
+  // 将对话时间转换为本地短时间，便于用户区分多轮问答。
+  if (!value) return ''
+  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(value))
+}
 
 function synchronizeProfileSelections(): void {
   // Profile 只能从已读取的 UUID 中选择，避免把示例数字误当成真实 ID 提交。
@@ -129,6 +452,7 @@ function statusLabel(status: string): string {
     not_started: '未开始', swap_requested: '发布中', published: '已发布', cleaned: '已清理',
     requested: '已请求', completed: '已完成', not_requested: '未请求', validation_failed: '校验失败',
     needs_clarification: '等待澄清',
+    idle: '待提问',
   }
   return labels[status] ?? status
 }
@@ -165,7 +489,7 @@ function errorLabel(code: string): string {
     PREPARATION_EXPIRED: 'Preparation 已过期，请重新准备', SELF_APPROVAL_FORBIDDEN: '制作人不能审批自己的申请',
     APPROVALS_INCOMPLETE: '审批尚未完成', PREPARATION_FINGERPRINT_MISMATCH: 'Preparation 指纹已变化，请重新准备',
     EXECUTION_NOT_FOUND: '执行记录不存在', EXECUTION_NOT_ROLLBACKABLE: '当前执行状态不可回滚', OUTBOX_DISPATCH_FAILED: '受管执行投递失败', BENCHMARK_NOT_FOUND: 'Benchmark 运行记录不存在',
-    INTERNAL_ERROR: '服务内部错误，请根据请求编号查看后端日志',
+    LLM_PROVIDER_UNAVAILABLE: '远端 LLM Provider 配置不可用', LLM_NOT_CONFIGURED: '百炼接口尚未配置完整', LLM_UPSTREAM_UNAVAILABLE: '百炼服务暂时不可用，请稍后重试', LLM_REQUEST_REJECTED: '百炼拒绝了请求，请检查模型和账号权限', LLM_TIMEOUT: '百炼请求超时，请稍后重试', LLM_NETWORK_ERROR: '无法连接百炼服务，请检查网络', LLM_INVALID_RESPONSE: '百炼返回格式无效', LLM_INVALID_JSON: '百炼未返回合法 JSON', LLM_PROMPT_TOO_LARGE: '发送给百炼的内容超过大小限制', LLM_FAKE_EXHAUSTED: '离线测试模型没有可用的预置回答', AGENT_CHAT_REQUIRES_COMPLETED: '生成完成后才能审查候选', AGENT_CHAT_BUSY: '上一条审查问题仍在处理中', AGENT_CHAT_EMPTY: '审查问题不能为空', AGENT_CHAT_FAILED: 'Agent 审查回答失败', GENERATION_QUEUE_UNAVAILABLE: 'Agent 任务队列暂时不可用', AGENT_REQUEST_INVALID: 'Agent 请求快照无法恢复', WORKFLOW_FAILED: '生成工作流异常', INTERNAL_ERROR: '服务内部错误，请根据请求编号查看后端日志',
     HTTP_400: '请求参数错误', HTTP_401: '登录状态无效，请重新登录', HTTP_403: '当前用户无权执行此操作',
     HTTP_404: '请求的资源不存在', HTTP_405: '当前操作不被支持', HTTP_422: '请求参数校验失败',
     HTTP_429: '请求过于频繁，请稍后再试', HTTP_500: '服务内部错误，请根据请求编号查看后端日志',
@@ -278,6 +602,7 @@ async function loadProjectData(): Promise<void> {
     ])
     connections.value = connectionRows
     pipelines.value = pipelineRows
+    await loadPipelineVersionLabels(pipelineRows)
     preparations.value = preparationRows
     executions.value = executionRows
     benchmarkHistory.value = benchmarkRows
@@ -332,9 +657,8 @@ function startEditConnection(connection: Connection): void {
 }
 
 function cancelEditConnection(): void {
-  // 退出编辑模式并恢复下一次登记使用的 VM 默认地址。
-  editingConnectionId.value = null
-  connectionForm.value = { code: 'synthetic_mysql', name: '合成 MySQL', connection_type: 'mysql', host: syntheticMysqlHost, port: 3306, database_name: 'etl_demo', username: 'etl_demo', secret_ref: 'secret/data/etl-agent/mysql' }
+  // 退出编辑模式并恢复下一次登记使用的 VM 合成 MySQL 默认值。
+  applyConnectionPreset('mysql')
 }
 
 function validateSyntheticMysqlHost(connection: Connection): boolean {
@@ -371,6 +695,10 @@ async function createProfile(connection: Connection): Promise<void> {
 
 async function createPipelineAndVersion(): Promise<void> {
   // 先创建 Pipeline，再创建不可变前的草稿版本供生成工作流使用。
+  stopGenerationPolling()
+  generationRun.value = null
+  clarificationAnswers.value = {}
+  chatQuestion.value = ''
   try {
     const pipeline = await api<Pipeline>('/api/v1/pipelines', { method: 'POST', body: JSON.stringify({ project_id: selectedProjectId.value, code: pipelineForm.value.code, name: pipelineForm.value.name }) })
     pipelines.value.push(pipeline)
@@ -383,21 +711,51 @@ async function createPipelineAndVersion(): Promise<void> {
 
 async function loadVersions(pipelineId: string): Promise<void> {
   // 读取指定 Pipeline 的版本列表并默认选中最新版本。
-  try { versions.value = await api<Version[]>(`/api/v1/pipelines/${pipelineId}/versions`); if (versions.value[0]) selectedVersionId.value = versions.value[0].id } catch (error) { notify(error instanceof Error ? error.message : '版本加载失败') }
+  try {
+    stopGenerationPolling()
+    generationRun.value = null
+    clarificationAnswers.value = {}
+    chatQuestion.value = ''
+    versions.value = await api<Version[]>(`/api/v1/pipelines/${pipelineId}/versions`)
+    if (versions.value[0]) selectedVersionId.value = versions.value[0].id
+  } catch (error) { notify(error instanceof Error ? error.message : '版本加载失败') }
 }
 
 function selectPipeline(event: Event): void {
   // 从选择器读取 Pipeline ID，再加载它的版本列表。
   const value = (event.target as HTMLSelectElement).value
+  stopGenerationPolling()
+  generationRun.value = null
+  clarificationAnswers.value = {}
+  chatQuestion.value = ''
   if (value) void loadVersions(value)
 }
 
+function selectVersion(): void {
+  // 切换草稿版本时清理旧 AgentRun，避免把另一版本的进度误显示在当前版本下。
+  stopGenerationPolling()
+  generationRun.value = null
+  clarificationAnswers.value = {}
+  chatQuestion.value = ''
+}
+
 async function generateVersion(): Promise<void> {
-  // 把业务需求和 Profile 引用提交给 LangGraph 生成边界。
+  // 把业务需求和 Profile 引用提交给异步 LangGraph 边界，并立即展示真实 AgentRun 进度。
+  stopGenerationPolling()
+  chatQuestion.value = ''
   try {
-    const run = await api<AnyRecord>(`/api/v1/versions/${selectedVersionId.value}/generation`, { method: 'POST', body: JSON.stringify({ business_request: pipelineForm.value.business_request, source_profile_ids: [sourceProfileId.value], target_profile_ids: [targetProfileId.value] }) })
-    notify(`生成状态：${statusLabel(String(run.status))}`)
-    await loadProjectData()
+    const run = await api<AgentRun>(`/api/v1/versions/${selectedVersionId.value}/generation/async`, {
+      method: 'POST',
+      body: JSON.stringify({
+        business_request: pipelineForm.value.business_request,
+        source_profile_ids: [sourceProfileId.value],
+        target_profile_ids: [targetProfileId.value],
+      }),
+    })
+    generationRun.value = run
+    clarificationAnswers.value = {}
+    notify('Agent 已开始运行，请查看下方工作流步骤')
+    void pollGenerationRun(run.id)
   } catch (error) { notify(error instanceof Error ? error.message : '生成失败') }
 }
 
@@ -407,7 +765,7 @@ async function prepareVersion(): Promise<void> {
     const preparation = await api<Preparation>(`/api/v1/versions/${selectedVersionId.value}/prepare`, { method: 'POST', body: JSON.stringify({}) })
     preparations.value.unshift(preparation)
     selectedPreparationId.value = preparation.id
-    notify(`Preparation 已创建，风险级别 ${preparation.risk_level}`)
+    notify(`Preparation 已创建：风险 ${preparation.risk_level}，需要 ${requiredRoleLabel(preparation.required_roles)}`)
   } catch (error) { notify(error instanceof Error ? error.message : 'Prepare 失败') }
 }
 
@@ -458,6 +816,7 @@ function logout(): void {
 }
 
 onMounted(async () => { if (token.value) await loadProjects() })
+onUnmounted(() => { stopGenerationPolling() })
 </script>
 
 <template>
@@ -500,18 +859,50 @@ onMounted(async () => { if (token.value) await loadProjects() })
           <div v-if="activeTab === 'overview' && projects.length" class="view">
             <div class="view-heading"><div><p class="eyebrow">WORKSPACE / OVERVIEW</p><h2>项目总览</h2><p class="project-context">当前项目：{{ selectedProject?.name }} <span class="mono">（{{ selectedProject?.code }}）</span></p></div><button class="primary" @click="activeTab = 'studio'">新建 Pipeline</button></div>
             <div class="metric-grid"><div class="metric"><span>连接</span><strong>{{ connections.length }}</strong><small>项目级登记</small></div><div class="metric"><span>Pipeline</span><strong>{{ pipelines.length }}</strong><small>含草稿与冻结版本</small></div><div class="metric"><span>待审批</span><strong>{{ preparations.filter(p => p.status === 'approval_pending').length }}</strong><small>等待 Checker</small></div><div class="metric"><span>执行</span><strong>{{ executions.length }}</strong><small>受管运行事实</small></div></div>
-            <div class="section-grid"><section class="panel"><div class="panel-title"><h3>最近执行</h3><button class="link-button" @click="activeTab = 'runs'">查看全部</button></div><div v-if="executions.length" class="table-wrap"><table><thead><tr><th>状态</th><th>执行 ID</th><th>质量</th></tr></thead><tbody><tr v-for="item in executions.slice(0,5)" :key="item.id"><td><span :class="['badge', item.status]">{{ statusLabel(item.status) }}</span></td><td class="mono">{{ item.id.slice(0, 12) }}…</td><td>{{ statusLabel(item.quality_status) }}</td></tr></tbody></table></div><p v-else class="empty">暂无执行事实</p></section><section class="panel"><div class="panel-title"><h3>Pipeline</h3><button class="link-button" @click="activeTab = 'studio'">打开 Studio</button></div><div v-if="pipelines.length" class="list"> <button v-for="pipeline in pipelines" :key="pipeline.id" class="list-row" @click="activeTab = 'studio'; loadVersions(pipeline.id)"><span><strong>{{ pipeline.name }}</strong><small>{{ pipeline.code }}</small></span><span class="badge">{{ statusLabel(pipeline.status) }}</span></button></div><p v-else class="empty">尚未创建 Pipeline</p></section></div>
+            <div class="section-grid"><section class="panel"><div class="panel-title"><h3>最近执行</h3><button class="link-button" @click="activeTab = 'runs'">查看全部</button></div><div v-if="executions.length" class="table-wrap"><table><thead><tr><th>状态</th><th>Pipeline / 版本</th><th>质量</th></tr></thead><tbody><tr v-for="item in executions.slice(0,5)" :key="item.id"><td><span :class="['badge', item.status]">{{ statusLabel(item.status) }}</span></td><td><strong>{{ pipelineVersionLabels[item.pipeline_version_id] ?? '执行记录' }}</strong><small class="mono">{{ shortId(item.id) }}</small></td><td>{{ statusLabel(item.quality_status) }}</td></tr></tbody></table></div><p v-else class="empty">暂无执行事实</p></section><section class="panel"><div class="panel-title"><h3>Pipeline</h3><button class="link-button" @click="activeTab = 'studio'">打开 Studio</button></div><div v-if="pipelines.length" class="list"> <button v-for="pipeline in pipelines" :key="pipeline.id" class="list-row" @click="activeTab = 'studio'; loadVersions(pipeline.id)"><span><strong>{{ pipeline.name }}</strong><small>{{ pipeline.code }}</small></span><span class="badge">{{ statusLabel(pipeline.status) }}</span></button></div><p v-else class="empty">尚未创建 Pipeline</p></section></div>
           </div>
 
-          <div v-if="activeTab === 'connections'" class="view"><div class="view-heading"><div><p class="eyebrow">ASSETS / PROFILE</p><h2>连接与 Profile</h2></div></div><section class="panel form-panel"><h3>{{ editingConnectionId ? '编辑连接' : '登记合成连接' }}</h3><div class="form-grid"><label>编码<input v-model="connectionForm.code" /></label><label>名称<input v-model="connectionForm.name" /></label><label>类型<select v-model="connectionForm.connection_type"><option>mysql</option><option>doris</option><option>postgresql</option></select></label><label>主机<input v-model="connectionForm.host" /></label><label>端口<input v-model.number="connectionForm.port" type="number" /></label><label>数据库<input v-model="connectionForm.database_name" /></label><label>用户名<input v-model="connectionForm.username" /></label><label>SecretRef<input v-model="connectionForm.secret_ref" /></label></div><div class="actions"><button class="primary" @click="createConnection">{{ editingConnectionId ? '保存连接' : '登记连接' }}</button><button v-if="editingConnectionId" class="quiet" @click="cancelEditConnection">取消</button></div></section><section class="panel"><div class="panel-title"><h3>项目连接</h3><button class="quiet" @click="loadProfiles">读取最近 Profile</button></div><div v-if="connections.length" class="table-wrap"><table><thead><tr><th>连接</th><th>类型</th><th>地址</th><th>Profile</th><th>操作</th></tr></thead><tbody><tr v-for="connection in connections" :key="connection.id"><td><strong>{{ connection.name }}</strong><small>{{ connection.code }}</small></td><td>{{ connection.connection_type }}</td><td class="mono">{{ connection.host }}:{{ connection.port }}</td><td><strong>{{ profiles[connection.id]?.estimated_row_count ?? '暂无' }}</strong><small class="mono">{{ profiles[connection.id]?.id ?? '' }}</small></td><td class="actions"><input v-model="profileTableNames[connection.id]" class="profile-table-input" placeholder="表名，可逗号分隔" /><button class="quiet" @click="testConnection(connection)">测试</button><button class="quiet" @click="createProfile(connection)">探查</button><button class="quiet" @click="startEditConnection(connection)">编辑</button></td></tr></tbody></table></div><p v-else class="empty">暂无连接</p></section></div>
+          <div v-if="activeTab === 'connections'" class="view"><div class="view-heading"><div><p class="eyebrow">ASSETS / PROFILE</p><h2>连接与 Profile</h2></div></div><section class="panel form-panel"><h3>{{ editingConnectionId ? '编辑连接' : '登记合成连接' }}</h3><div class="preset-actions"><span class="muted">快速填充 VM 合成环境：</span><button class="quiet" @click="applyConnectionPreset('mysql')">MySQL 8.0</button><button class="quiet" @click="applyConnectionPreset('doris')">Doris 2.1</button></div><div class="form-grid"><label>编码<input v-model="connectionForm.code" /></label><label>名称<input v-model="connectionForm.name" /></label><label>类型<select v-model="connectionForm.connection_type"><option>mysql</option><option>doris</option><option>postgresql</option></select></label><label>主机<input v-model="connectionForm.host" /></label><label>端口<input v-model.number="connectionForm.port" type="number" /></label><label>数据库<input v-model="connectionForm.database_name" list="database-options" /></label><label>用户名<input v-model="connectionForm.username" /></label><label>SecretRef<input v-model="connectionForm.secret_ref" /></label></div><datalist id="database-options"><option value="etl_demo" /><option value="etl_demo_dw" /></datalist><p class="form-hint">开发机访问虚拟机服务请使用 {{ syntheticMysqlHost }}，不要填写 localhost。数据库和表名可从建议列表选择，也可以保留自定义值。</p><div class="actions"><button class="primary" @click="createConnection">{{ editingConnectionId ? '保存连接' : '登记连接' }}</button><button v-if="editingConnectionId" class="quiet" @click="cancelEditConnection">取消</button></div></section><section class="panel"><div class="panel-title"><h3>项目连接</h3><button class="quiet" @click="loadProfiles">读取最近 Profile</button></div><div v-if="connections.length" class="table-wrap"><table><thead><tr><th>连接</th><th>类型</th><th>地址</th><th>Profile</th><th>操作</th></tr></thead><tbody><tr v-for="connection in connections" :key="connection.id"><td><strong>{{ connection.name }}</strong><small>{{ connection.code }}</small></td><td>{{ connection.connection_type }}</td><td class="mono">{{ connection.host }}:{{ connection.port }}</td><td><strong>{{ profiles[connection.id]?.estimated_row_count ?? '暂无' }}</strong><small v-if="profiles[connection.id]">{{ profileTableNamesFromProfile(profiles[connection.id]).join(', ') || '未识别表' }}</small><small class="mono">{{ profiles[connection.id] ? shortId(profiles[connection.id].id) : '' }}</small></td><td class="actions"><input v-model="profileTableNames[connection.id]" class="profile-table-input" :list="`tables-${connection.id}`" placeholder="表名，可逗号分隔" /><datalist :id="`tables-${connection.id}`"><option v-for="tableName in connectionTableNames(connection)" :key="tableName" :value="tableName" /></datalist><button class="quiet" @click="testConnection(connection)">测试</button><button class="quiet" @click="createProfile(connection)">探查</button><button class="quiet" @click="startEditConnection(connection)">编辑</button></td></tr></tbody></table></div><p v-else class="empty">暂无连接</p></section></div>
 
-          <div v-if="activeTab === 'studio'" class="view"><div class="view-heading"><div><p class="eyebrow">DESIGN / IMMUTABLE VERSION</p><h2>Pipeline Studio</h2></div></div><section class="panel form-panel"><h3>创建 Pipeline 草稿</h3><div class="form-grid"><label>编码<input v-model="pipelineForm.code" /></label><label>名称<input v-model="pipelineForm.name" /></label><label class="wide-field">业务需求<textarea v-model="pipelineForm.business_request" rows="3" /></label></div><button class="primary" @click="createPipelineAndVersion">创建草稿版本</button></section><section class="panel"><div class="panel-title"><h3>生成与 Prepare</h3><span class="muted">先在“连接与 Profile”读取或探查 Profile，再提交生成</span></div><div class="form-grid"><label>Pipeline<select @change="selectPipeline"><option value="">选择 Pipeline</option><option v-for="pipeline in pipelines" :key="pipeline.id" :value="pipeline.id">{{ pipeline.name }}</option></select></label><label>版本<select v-model="selectedVersionId"><option value="">选择版本</option><option v-for="version in versions" :key="version.id" :value="version.id">v{{ version.version_number }} / {{ statusLabel(version.status) }}</option></select></label><label>源 Profile<select v-model="sourceProfileId" :disabled="!profileOptions.length"><option value="">{{ profileOptions.length ? '选择源 Profile' : '请先读取 Profile' }}</option><option v-for="profile in profileOptions" :key="`source-${profile.id}`" :value="profile.id">{{ profile.label }}</option></select></label><label>目标 Profile<select v-model="targetProfileId" :disabled="!profileOptions.length"><option value="">{{ profileOptions.length ? '选择目标 Profile' : '请先读取 Profile' }}</option><option v-for="profile in profileOptions" :key="`target-${profile.id}`" :value="profile.id">{{ profile.label }}</option></select></label></div><div class="actions"><button class="primary" :disabled="!selectedVersionId || !sourceProfileId || !targetProfileId" @click="generateVersion">运行生成</button><button class="quiet" :disabled="!selectedVersionId || !sourceProfileId || !targetProfileId" @click="prepareVersion">Prepare</button></div></section></div>
+          <div v-if="activeTab === 'studio'" class="view">
+            <div class="view-heading"><div><p class="eyebrow">DESIGN / IMMUTABLE VERSION</p><h2>Pipeline Studio</h2></div></div>
+            <section class="panel form-panel"><h3>创建 Pipeline 草稿</h3><div class="form-grid"><label>编码<input v-model="pipelineForm.code" /></label><label>名称<input v-model="pipelineForm.name" /></label><label class="wide-field">业务需求<textarea v-model="pipelineForm.business_request" rows="3" /></label></div><button class="primary" @click="createPipelineAndVersion">创建草稿版本</button></section>
+            <section class="panel"><div class="panel-title"><h3>生成与 Prepare</h3><span class="muted">先在“连接与 Profile”读取或探查 Profile，再提交生成</span></div><div class="form-grid"><label>Pipeline<select @change="selectPipeline"><option value="">选择 Pipeline</option><option v-for="pipeline in pipelines" :key="pipeline.id" :value="pipeline.id">{{ pipeline.name }}（{{ pipeline.code }}）</option></select></label><label>版本<select v-model="selectedVersionId" @change="selectVersion"><option value="">选择版本</option><option v-for="version in versions" :key="version.id" :value="version.id">v{{ version.version_number }} / {{ statusLabel(version.status) }}</option></select></label><label>源 Profile<select v-model="sourceProfileId" :disabled="!profileOptions.length"><option value="">{{ profileOptions.length ? '选择源 Profile' : '请先读取 Profile' }}</option><option v-for="profile in profileOptions" :key="`source-${profile.id}`" :value="profile.id">{{ profile.label }}</option></select></label><label>目标 Profile<select v-model="targetProfileId" :disabled="!profileOptions.length"><option value="">{{ profileOptions.length ? '选择目标 Profile' : '请先读取 Profile' }}</option><option v-for="profile in profileOptions" :key="`target-${profile.id}`" :value="profile.id">{{ profile.label }}</option></select></label></div><div class="actions"><button class="primary" :disabled="!selectedVersionId || !sourceProfileId || !targetProfileId || generationRun?.status === 'running'" @click="generateVersion">{{ generationRun?.status === 'running' ? 'Agent 运行中…' : '运行生成' }}</button><button class="quiet" :disabled="!selectedVersionId || !sourceProfileId || !targetProfileId || generationRun?.status === 'running' || generationRun?.status === 'needs_clarification' || ['queued', 'running'].includes(generationRun?.chat_status ?? '')" @click="prepareVersion">{{ ['queued', 'running'].includes(generationRun?.chat_status ?? '') ? '审查回答中…' : 'Prepare' }}</button></div></section>
+            <section v-if="generationRun" class="panel agent-panel">
+              <div class="panel-title"><div><h3>Agent 生成工作流</h3><small class="mono">Run {{ shortId(generationRun.id) }}</small></div><span :class="['badge', generationRun.status]">{{ statusLabel(generationRun.status) }}</span></div>
+              <div class="agent-meta"><span>当前步骤 <strong>{{ currentGenerationStep(generationRun) }}</strong></span><span>模型 <strong>{{ generationRun.provider || '未返回' }} / {{ generationRun.model || '未返回' }}</strong></span><span>修复次数 <strong>{{ generationRun.repair_count }}</strong></span><span>进度 <strong>{{ generationProgressText(generationRun) }}</strong></span><span>对话 <strong>{{ statusLabel(generationRun.chat_status) }}</strong></span></div>
+              <div class="agent-steps"><div v-for="step in generationSteps" :key="step.key" :class="['agent-step', generationStepClass(step, generationRun)]"><span class="agent-step-marker">{{ generationStepState(step, generationRun) === 'done' ? '✓' : generationStepState(step, generationRun) === 'current' ? '●' : '○' }}</span><span>{{ step.label }}</span><small>{{ generationStepStatusLabel(step, generationRun) }}</small></div></div>
+              <div class="agent-context-summary">
+                <div><span class="agent-context-label">上游已完成</span><strong>{{ generationUpstreamText(generationRun) }}</strong><p>这些阶段的结果已经持久化，并作为当前阶段的输入。</p></div>
+                <div><span class="agent-context-label">当前正在做</span><strong>{{ generationCurrentDetail(generationRun)?.action || currentGenerationStep(generationRun) }}</strong><p>{{ generationCurrentDetail(generationRun)?.upstream || '等待 Worker 领取任务' }}</p></div>
+                <div><span class="agent-context-label">当前阶段产物</span><strong>{{ generationCurrentArtifact(generationRun) }}</strong><p>{{ generationCurrentDetail(generationRun)?.downstream || '产物将由下一阶段继续处理' }}</p></div>
+              </div>
+              <div class="agent-stage-table"><div class="agent-stage-heading"><span>阶段产物链（真实节点轨迹）</span><small>状态来自 AgentRun，不代表预估进度</small></div><div v-for="step in generationSteps" :key="`detail-${step.key}`" :class="['agent-stage-row', generationStepClass(step, generationRun)]"><div class="agent-stage-title"><span>{{ step.label }}</span><span class="badge">{{ generationStepStatusLabel(step, generationRun) }}</span></div><div class="agent-stage-columns"><div><small>上游输入</small><p>{{ step.upstream }}</p></div><div><small>本阶段动作</small><p>{{ step.action }}</p></div><div><small>已产出</small><p>{{ generationStageArtifact(step, generationRun) }}</p></div><div><small>下游用途</small><p>{{ step.downstream }}</p></div></div></div></div>
+              <div v-if="generationRun.validation_issues.length" class="agent-issues"><strong>校验问题</strong><p v-for="issue in generationRun.validation_issues" :key="`${issue.code}-${issue.message}`">{{ issue.message }}<span v-if="issue.path.length">（{{ issue.path.join('.') }}）</span></p></div>
+              <div v-if="generationRun.clarification_questions.length" class="clarification-box"><h4>需要你补充信息</h4><label v-for="question in generationRun.clarification_questions" :key="question.key">{{ question.question }}<textarea v-model="clarificationAnswers[question.key]" rows="2" /></label><button class="primary" :disabled="generationRun.status !== 'needs_clarification'" @click="answerClarification">提交澄清并继续</button></div>
+              <div v-if="generationRun.plan" class="agent-output">
+                <div class="panel-title"><h3>大模型候选结果（审查后才可 Prepare）</h3><span class="badge succeeded">已通过结构化门禁</span></div>
+                <div class="output-grid">
+                  <div><h4>字段映射</h4><div class="table-wrap"><table><thead><tr><th>源字段</th><th>目标字段</th><th>转换</th></tr></thead><tbody><tr v-for="mapping in generationRun.plan.field_mappings" :key="`${mapping.source_field}-${mapping.target_field}`"><td class="mono">{{ mapping.source_field }}</td><td class="mono">{{ mapping.target_field }}</td><td>{{ mapping.transform || '直接映射' }}</td></tr></tbody></table></div></div>
+                  <div><h4>转换与质量规则</h4><pre class="output-json">{{ JSON.stringify({ transforms: generationRun.plan.transforms, quality_contract: generationRun.plan.quality_contract }, null, 2) }}</pre></div>
+                </div>
+                <details class="hocon-details"><summary>查看模型输出的 HOCON 执行文件</summary><pre class="hocon-view">{{ generationRun.plan.hocon }}</pre></details>
+              </div>
+              <div v-if="generationRun.plan" class="agent-chat">
+                <div class="panel-title"><h3>候选审查对话</h3><span class="muted">{{ generationRun.chat_status === 'running' || generationRun.chat_status === 'queued' ? 'Agent 正在回答…' : '可继续提问' }}</span></div>
+                <div class="chat-thread"><div v-for="(item, index) in generationRun.chat_messages" :key="`${item.created_at}-${index}`" :class="['chat-message', item.role === 'user' ? 'chat-user' : 'chat-assistant']"><div class="chat-message-meta">{{ item.role === 'user' ? '我' : 'Agent' }}<span>{{ formatChatTime(item.created_at) }}</span></div><p>{{ item.content }}</p></div><p v-if="!generationRun.chat_messages.length" class="empty">暂无审查对话</p></div>
+                <div class="chat-compose"><textarea v-model="chatQuestion" rows="2" placeholder="例如：请检查 amount <= 0 是否会被拒绝，以及 email 是否会写入目标表" :disabled="['queued', 'running'].includes(generationRun.chat_status)" @keydown.ctrl.enter="chatWithAgent" /><button class="primary" :disabled="!chatQuestion.trim() || ['queued', 'running'].includes(generationRun.chat_status)" @click="chatWithAgent">{{ ['queued', 'running'].includes(generationRun.chat_status) ? '回答中…' : '发送审查问题' }}</button></div>
+                <p v-if="generationRun.chat_error_code" class="error-text">{{ errorLabel(generationRun.chat_error_code) }}<span v-if="generationRun.chat_error_detail">：{{ generationRun.chat_error_detail }}</span></p>
+              </div>
+              <p v-if="generationRun.error_code" class="error-text">{{ errorLabel(generationRun.error_code) }}<span v-if="generationRun.error_detail">：{{ generationRun.error_detail }}</span></p>
+            </section>
+          </div>
 
-          <div v-if="activeTab === 'approvals'" class="view"><div class="view-heading"><div><p class="eyebrow">HARNESS / FOUR EYES</p><h2>审批工作台</h2></div></div><section v-for="preparation in preparations" :key="preparation.id" class="panel"><div class="panel-title"><div><h3>{{ preparation.id.slice(0, 12) }}…</h3><small>风险 {{ preparation.risk_level }} · {{ statusLabel(preparation.status) }}</small></div><button v-if="preparation.status === 'approved'" class="primary" @click="selectedPreparationId = preparation.id; commitPreparation()">Commit</button></div><div class="approval-list"><div v-for="approval in preparation.approval_requests" :key="approval.id" class="approval-row"><span class="badge">{{ roleLabel(approval.required_role) }}</span><span>{{ statusLabel(approval.status) }}</span><span class="spacer"></span><button v-if="approval.status === 'pending'" class="quiet" @click="decideApproval(approval, 'reject')">拒绝</button><button v-if="approval.status === 'pending'" class="primary small-button" @click="decideApproval(approval, 'approve')">批准</button></div></div></section><p v-if="!preparations.length" class="empty">暂无 Preparation</p></div>
+          <div v-if="activeTab === 'approvals'" class="view"><div class="view-heading"><div><p class="eyebrow">HARNESS / FOUR EYES</p><h2>审批工作台</h2></div></div><section v-for="preparation in preparations" :key="preparation.id" class="panel"><div class="panel-title"><div><h3>{{ pipelineVersionLabels[preparation.pipeline_version_id] ?? 'Pipeline 版本' }}</h3><small>Preparation {{ shortId(preparation.id) }}</small></div><button v-if="preparation.status === 'approved'" class="primary" @click="selectedPreparationId = preparation.id; commitPreparation()">Commit</button></div><div class="risk-summary"><span>风险级别 <strong>{{ preparation.risk_level }}</strong></span><span>审批要求 <strong>{{ requiredRoleLabel(preparation.required_roles) }}</strong></span><span>状态 <strong>{{ statusLabel(preparation.status) }}</strong></span></div><div class="approval-list"><div v-for="approval in preparation.approval_requests" :key="approval.id" class="approval-row"><span class="badge">{{ roleLabel(approval.required_role) }}</span><span>{{ statusLabel(approval.status) }}</span><span class="spacer"></span><button v-if="approval.status === 'pending'" class="quiet" @click="decideApproval(approval, 'reject')">拒绝</button><button v-if="approval.status === 'pending'" class="primary small-button" @click="decideApproval(approval, 'approve')">批准</button></div></div></section><p v-if="!preparations.length" class="empty">暂无 Preparation</p></div>
 
-          <div v-if="activeTab === 'runs'" class="view"><div class="view-heading"><div><p class="eyebrow">DATA PLANE / SUPERVISION</p><h2>运行中心</h2></div><button class="quiet" @click="loadProjectData">刷新状态</button></div><section v-for="execution in executions" :key="execution.id" class="panel execution-panel"><div class="panel-title"><div><h3 class="mono">{{ execution.id }}</h3><span :class="['badge', execution.status]">{{ statusLabel(execution.status) }}</span></div><div class="actions"><button v-if="['queued','running','cancel_requested'].includes(execution.status)" class="quiet" @click="cancelExecution(execution)">取消</button><button v-if="['succeeded','failed','cancelled'].includes(execution.status)" class="quiet" @click="rollbackExecution(execution)">回滚</button></div></div><div class="metric-strip"><span>质量 <strong>{{ statusLabel(execution.quality_status) }}</strong></span><span>发布 <strong>{{ statusLabel(execution.publish_status) }}</strong></span><span>回滚 <strong>{{ statusLabel(execution.rollback_status) }}</strong></span><span>输入 <strong>{{ execution.metrics.input_records ?? '-' }}</strong></span><span>输出 <strong>{{ execution.metrics.output_records ?? '-' }}</strong></span></div><p v-if="execution.error_code" class="error-text">{{ errorLabel(execution.error_code) }}<span v-if="execution.error_detail">：{{ execution.error_detail }}</span></p></section><p v-if="!executions.length" class="empty">暂无执行事实</p></div>
+          <div v-if="activeTab === 'runs'" class="view"><div class="view-heading"><div><p class="eyebrow">DATA PLANE / SUPERVISION</p><h2>运行中心</h2></div><button class="quiet" @click="loadProjectData">刷新状态</button></div><section v-for="execution in executions" :key="execution.id" class="panel execution-panel"><div class="panel-title"><div><h3>{{ pipelineVersionLabels[execution.pipeline_version_id] ?? 'Pipeline 版本' }}</h3><small class="mono">执行 {{ shortId(execution.id) }}</small><span :class="['badge', execution.status]">{{ statusLabel(execution.status) }}</span></div><div class="actions"><button v-if="['queued','running','cancel_requested'].includes(execution.status)" class="quiet" @click="cancelExecution(execution)">取消</button><button v-if="['succeeded','failed','cancelled'].includes(execution.status)" class="quiet" @click="rollbackExecution(execution)">回滚</button></div></div><div class="metric-strip"><span>质量 <strong>{{ statusLabel(execution.quality_status) }}</strong></span><span>发布 <strong>{{ statusLabel(execution.publish_status) }}</strong></span><span>回滚 <strong>{{ statusLabel(execution.rollback_status) }}</strong></span><span>输入 <strong>{{ execution.metrics.input_records ?? '-' }}</strong></span><span>输出 <strong>{{ execution.metrics.output_records ?? '-' }}</strong></span></div><p v-if="execution.error_code" class="error-text">{{ errorLabel(execution.error_code) }}<span v-if="execution.error_detail">：{{ execution.error_detail }}</span></p></section><p v-if="!executions.length" class="empty">暂无执行事实</p></div>
 
-          <div v-if="activeTab === 'benchmark'" class="view"><div class="view-heading"><div><p class="eyebrow">EVIDENCE / REPEATABLE</p><h2>Benchmark</h2></div></div><section class="panel form-panel"><h3>运行合成基准</h3><div class="form-grid"><label>级别<select v-model="benchmarkForm.level"><option value="l0">L0 基线</option><option value="l1">L1 故障注入</option></select></label><label>数据行数<input v-model.number="benchmarkForm.dataset_rows" type="number" min="1" /></label><label>重复次数<input v-model.number="benchmarkForm.repeat" type="number" min="1" /></label><label>随机种子<input v-model.number="benchmarkForm.seed" type="number" /></label><label>制品摘要<input v-model="benchmarkForm.artifact_digest" /></label><label>策略版本<input v-model="benchmarkForm.policy_version" /></label></div><button class="primary" @click="runBenchmark">运行 Benchmark</button></section><section v-if="benchmarkReport" class="panel"><div class="panel-title"><h3>报告 {{ benchmarkReport.benchmark_id.slice(0, 12) }}…</h3><span class="badge">{{ benchmarkReport.level }}</span></div><div class="metric-grid compact"><div class="metric"><span>输入</span><strong>{{ benchmarkReport.metrics.input_records }}</strong></div><div class="metric"><span>输出</span><strong>{{ benchmarkReport.metrics.output_records }}</strong></div><div class="metric"><span>拒绝率</span><strong>{{ benchmarkReport.metrics.rejection_rate }}</strong></div><div class="metric"><span>P0 拦截率</span><strong>{{ benchmarkReport.metrics.p0_interception_rate }}</strong></div></div><pre class="report-json">{{ JSON.stringify(benchmarkReport, null, 2) }}</pre></section><section class="panel"><div class="panel-title"><h3>历史报告</h3><button class="quiet" @click="loadProjectData">刷新</button></div><div v-if="benchmarkHistory.length" class="table-wrap"><table><thead><tr><th>完成时间</th><th>级别</th><th>数据规模</th><th>拒绝率</th><th>质量结论</th></tr></thead><tbody><tr v-for="item in benchmarkHistory" :key="item.benchmark_id" @click="benchmarkReport = item"><td>{{ formatBenchmarkTime(item.completed_at) }}</td><td><span class="badge">{{ item.level }}</span></td><td>{{ item.dataset_rows }} × {{ item.repeat }}</td><td>{{ item.metrics.rejection_rate }}</td><td>{{ item.metrics.quality_decision === 'passed' ? '通过' : '拒绝' }}</td></tr></tbody></table></div><p v-else class="empty">暂无历史 Benchmark</p></section></div>
+          <div v-if="activeTab === 'benchmark'" class="view"><div class="view-heading"><div><p class="eyebrow">EVIDENCE / REPEATABLE</p><h2>Benchmark</h2></div></div><section class="panel form-panel"><h3>运行合成基准</h3><div class="form-grid"><label>级别<select v-model="benchmarkForm.level"><option value="l0">L0 基线</option><option value="l1">L1 故障注入</option></select></label><label>数据行数<input v-model.number="benchmarkForm.dataset_rows" type="number" min="1" /></label><label>重复次数<input v-model.number="benchmarkForm.repeat" type="number" min="1" /></label><label>随机种子<input v-model.number="benchmarkForm.seed" type="number" /></label><label>制品摘要<input v-model="benchmarkForm.artifact_digest" /></label><label>策略版本<input v-model="benchmarkForm.policy_version" /></label></div><button class="primary" @click="runBenchmark">运行 Benchmark</button></section><section v-if="benchmarkReport" class="panel"><div class="panel-title"><h3>报告 {{ shortId(benchmarkReport.benchmark_id) }}</h3><span class="badge">{{ benchmarkReport.level }}</span></div><div class="metric-grid compact"><div class="metric"><span>输入</span><strong>{{ benchmarkReport.metrics.input_records }}</strong></div><div class="metric"><span>输出</span><strong>{{ benchmarkReport.metrics.output_records }}</strong></div><div class="metric"><span>拒绝率</span><strong>{{ benchmarkReport.metrics.rejection_rate }}</strong></div><div class="metric"><span>P0 拦截率</span><strong>{{ benchmarkReport.metrics.p0_interception_rate }}</strong></div></div><pre class="report-json">{{ JSON.stringify(benchmarkReport, null, 2) }}</pre></section><section class="panel"><div class="panel-title"><h3>历史报告</h3><button class="quiet" @click="loadProjectData">刷新</button></div><div v-if="benchmarkHistory.length" class="table-wrap"><table><thead><tr><th>完成时间</th><th>级别</th><th>数据规模</th><th>拒绝率</th><th>质量结论</th></tr></thead><tbody><tr v-for="item in benchmarkHistory" :key="item.benchmark_id" @click="benchmarkReport = item"><td>{{ formatBenchmarkTime(item.completed_at) }}</td><td><span class="badge">{{ item.level }}</span></td><td>{{ item.dataset_rows }} × {{ item.repeat }}</td><td>{{ item.metrics.rejection_rate }}</td><td>{{ item.metrics.quality_decision === 'passed' ? '通过' : '拒绝' }}</td></tr></tbody></table></div><p v-else class="empty">暂无历史 Benchmark</p></section></div>
         </section>
       </div>
     </template>

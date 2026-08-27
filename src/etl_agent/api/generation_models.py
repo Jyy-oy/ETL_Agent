@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from etl_agent.domain.generation import (
+    ClarificationQuestion,
     EtlPlan,
     ProfileContext,
     RuntimeBudget,
@@ -75,8 +76,14 @@ class GenerationAnswerRequest(BaseModel):
     answers: dict[str, str] = Field(min_length=1, max_length=50)
 
 
+class AgentChatRequest(BaseModel):
+    """提交一次候选审查问题，消息会由 Worker 异步回答。"""
+
+    message: str = Field(min_length=1, max_length=4_000)
+
+
 class AgentRunResponse(BaseModel):
-    """生成运行结果和最小可审计证据。"""
+    """生成运行结果、中间进度和最小可审计证据。"""
 
     id: UUID
     thread_id: str
@@ -88,7 +95,13 @@ class AgentRunResponse(BaseModel):
     provider: str | None
     model: str | None
     error_code: str | None
+    error_detail: str | None
+    clarification_questions: list[ClarificationQuestion] = Field(default_factory=list)
     validation_issues: list[ValidationIssue] = Field(default_factory=list)
+    chat_status: str = "idle"
+    chat_messages: list[dict[str, object]] = Field(default_factory=list)
+    chat_error_code: str | None = None
+    chat_error_detail: str | None = None
     plan: EtlPlan | None = None
 
 

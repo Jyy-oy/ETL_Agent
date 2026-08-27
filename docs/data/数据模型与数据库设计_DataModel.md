@@ -43,7 +43,7 @@ M1.2 为 `users` 增加可轮换的 `password_hash` 字段，仅用于本地 dev
 
 M2.3 的 `file_assets` 保存项目归属、上传用户、MinIO bucket/object key、原始文件名、内容类型、格式、大小、SHA-256 和脱敏 `schema_json`；原始文件不进入 PostgreSQL。上传限制由配置 `MAX_UPLOAD_SIZE_BYTES` 控制，数据库提交失败时执行对象删除补偿。
 
-M3.1 已落地 `pipelines`、`pipeline_versions`、`agent_runs` 和 `generation_attempts`（迁移 `0005_agent_generation`、`0006_agent_run_request`）。草稿版本允许生成写入；门禁通过后才写入规范化 EtlPlan、HOCON、`artifact_digest` 并设置 `immutable=true`。AgentRun 保存 thread/provider/model、Prompt 摘要、脱敏请求快照、节点轨迹、修复次数和错误码；每次候选或修复只保存输出摘要与校验错误，不保存完整 Prompt、API Key 或未脱敏样本。LangGraph Checkpoint 由 PostgreSQL 独立表承载，不能以进程内存替代。
+M3.1 已落地 `pipelines`、`pipeline_versions`、`agent_runs` 和 `generation_attempts`（迁移 `0005_agent_generation`、`0006_agent_run_request`）。草稿版本允许生成写入；门禁通过后才写入规范化 EtlPlan、HOCON、`artifact_digest` 并设置 `immutable=true`。AgentRun 保存 thread/provider/model、Prompt 摘要、脱敏请求快照、节点轨迹、修复次数和错误码；`0013_agent_run_chat` 增加 `chat_status`、`chat_messages` 和对话错误摘要，供候选审查轮询；不保存完整 Prompt、API Key 或未脱敏样本。LangGraph Checkpoint 由 PostgreSQL 独立表承载，不能以进程内存替代。
 
 M4.1 已落地 `preparations`（迁移 `0007_preparations`）。Prepare 只接受 `immutable=true` 且 `ready` 的 PipelineVersion，重新读取项目内 Profile 指纹，由 PDP v1 计算风险级别和所需 Checker 槽，并保存输入指纹、资源范围、预算、策略版本、脱敏事实和过期时间；该阶段不触发任何外部写操作。
 

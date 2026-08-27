@@ -6,7 +6,8 @@ PostgreSQL Checkpoint 持久化，供澄清回答后的同一 thread 恢复。
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from collections.abc import Awaitable, Callable
+from typing import Any, TypedDict, cast
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -21,6 +22,12 @@ from etl_agent.domain.generation import (
 )
 from etl_agent.infrastructure.llm import LLMProvider, LLMProviderError
 from etl_agent.workflows.validation import compile_hocon, validate_plan_payload
+
+# 这些错误代表真实数据面尚未具备对应能力，不能靠再次提示模型修复。
+_TERMINAL_VALIDATION_CODES = {
+    "UNSUPPORTED_DATA_PLANE_FEATURE",
+    "UNSUPPORTED_DATA_PLANE_TRANSFORM",
+}
 
 
 class GenerationState(TypedDict, total=False):
@@ -45,6 +52,13 @@ class GenerationState(TypedDict, total=False):
 def _trace(state: GenerationState, node: str) -> list[str]:
     """追加节点名，帮助 AgentRun 记录可审计的执行路径。"""
     return [*state.get("node_trace", []), node]
+
+
+def _has_terminal_validation_issue(state: GenerationState) -> bool:
+    """判断校验结果是否属于数据面能力边界，避免无效的模型修复调用。"""
+    return any(
+        issue.code in _TERMINAL_VALIDATION_CODES for issue in state.get("validation_issues", [])
+    )
 
 
 def _clarification_questions(request: GenerationRequest) -> list[ClarificationQuestion]:
@@ -216,12 +230,16 @@ def build_generation_graph(
         """合法候选进入 HOCON 节点，非法候选按次数进入修复或结束。"""
         if state.get("plan") is not None:
             return "hocon"
+        if _has_terminal_validation_issue(state):
+            return "stop"
         return "repair" if state.get("repair_count", 0) < max_repairs else "stop"
 
     def after_gate(state: GenerationState) -> str:
         """门禁通过结束，失败仅允许有限次修复。"""
         if state.get("status") == "completed":
             return "done"
+        if _has_terminal_validation_issue(state):
+            return "stop"
         return "repair" if state.get("repair_count", 0) < max_repairs else "stop"
 
     graph = StateGraph(GenerationState)
@@ -266,11 +284,22 @@ async def run_generation_workflow(
     thread_id: str | None = None,
     checkpointer: Any | None = None,
     max_repairs: int = 1,
+    progress_callback: Callable[[str, GenerationState], Awaitable[None]] | None = None,
 ) -> GenerationResult:
-    """运行一次生成图并返回稳定结果；thread_id 用于 Checkpoint 恢复。"""
+    """运行一次生成图并返回稳定结果；可选逐节点回调用于持久化进度。"""
     graph = build_generation_graph(provider, checkpointer=checkpointer, max_repairs=max_repairs)
     config = {"configurable": {"thread_id": thread_id or str(uuid4())}} if checkpointer else None
-    state = await graph.ainvoke({"request": request}, config=config)
+    if progress_callback is None:
+        state = await graph.ainvoke({"request": request}, config=config)
+    else:
+        # updates 模式只返回节点增量；这里合并成累计状态后再交给持久化回调。
+        state = {"request": request}
+        async for update in graph.astream(
+            {"request": request}, config=config, stream_mode="updates"
+        ):
+            for node_name, delta in update.items():
+                state = cast(GenerationState, {**state, **delta})
+                await progress_callback(str(node_name), state)
     return GenerationResult(
         status=state.get("status", "failed"),
         plan=state.get("plan"),

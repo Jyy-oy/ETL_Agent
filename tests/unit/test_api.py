@@ -55,7 +55,10 @@ def test_m1_auth_and_project_routes_are_registered() -> None:
     assert "/api/v1/pipelines" in paths
     assert "/api/v1/pipelines/{pipeline_id}/versions" in paths
     assert "/api/v1/versions/{version_id}/generation" in paths
+    assert "/api/v1/versions/{version_id}/generation/async" in paths
+    assert "/api/v1/agent-runs/{run_id}" in paths
     assert "/api/v1/agent-runs/{run_id}/answers" in paths
+    assert "/api/v1/agent-runs/{run_id}/chat" in paths
     assert "/api/v1/versions/{version_id}/design" in paths
     assert "/api/v1/versions/{version_id}/prepare" in paths
     assert "/api/v1/approval-requests/{approval_id}/decisions" in paths

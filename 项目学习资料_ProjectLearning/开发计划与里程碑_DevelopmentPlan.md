@@ -98,13 +98,14 @@
 
 ## 里程碑 M6：前端与 Benchmark
 
-当前进度：M6.1 Benchmark 历史摘要持久化已完成；实时推送、真实 L2 链路和企业 SSO 仍是后续扩展。
+当前进度：M6.2 Agent 生成进度、候选结果审查和持久化对话已完成；通用 SSE/WebSocket 实时推送、真实 L2 链路和企业 SSO 仍是后续扩展。
 
 - [x] Vue 3 + Vite + TypeScript 控制台：总览、连接/Profile、Pipeline Studio、审批工作台、运行中心和 Benchmark。
 - [x] 项目级 Pipeline/Version、Preparation、ExecutionRun 列表查询 API，按项目成员权限过滤。
 - [x] L0 基线、L1 故障注入的确定性 Benchmark API 和 CLI；报告绑定制品摘要、策略版本、环境和数据集摘要。
 - [x] M6 单元测试与前端生产构建验证。
 - [x] M6.1 Benchmark 运行事实表、项目级历史查询 API、单条报告查询和控制台历史列表。
+- [x] M6.2 异步 AgentRun/Celery 生成、节点进度、澄清和候选审查对话；EtlPlan/HOCON 审查展示、连接预设、Profile 表名建议、业务名称展示、Checker 要求和 Worker 结构化日志。
 - [ ] 可选扩展：Benchmark MinIO 报告存档、SSE/WebSocket 实时指标、真实 L2 链路、OIDC/SSO。
 
 完成条件：关键用户路径可用，结果关联版本、策略和环境。

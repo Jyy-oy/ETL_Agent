@@ -57,6 +57,22 @@ def sanitize_engine_detail(value: Any) -> str | None:
     return detail[:512] or None
 
 
+def _response_error_detail(response: httpx.Response) -> str:
+    """提取并脱敏 SeaTunnel HTTP 错误摘要，保留状态码帮助定位提交失败。"""
+    try:
+        body: Any = response.json()
+    except ValueError:
+        body = response.text
+    if isinstance(body, dict):
+        detail = (
+            body.get("detail") or body.get("message") or body.get("errorMsg") or body.get("error")
+        )
+    else:
+        detail = body
+    safe_detail = sanitize_engine_detail(detail)
+    return f"SeaTunnel HTTP {response.status_code}" + (f": {safe_detail}" if safe_detail else "")
+
+
 def _metric_int(value: Any) -> int:
     """把 SeaTunnel 的字符串或数字指标安全转换为非负整数。"""
     try:
@@ -222,7 +238,9 @@ class SeaTunnelAdapter:
             response.raise_for_status()
             body = response.json()
         except (httpx.HTTPStatusError, ValueError) as exc:
-            raise EngineError("SeaTunnel 作业提交失败") from exc
+            raise EngineError(
+                f"SeaTunnel 作业提交失败（{_response_error_detail(response)}）"
+            ) from exc
         if not isinstance(body, dict):
             raise EngineError("SeaTunnel 返回的作业响应不是 JSON 对象")
         job_id = body.get("job_id") or body.get("jobId") or body.get("id")
@@ -237,7 +255,9 @@ class SeaTunnelAdapter:
             response.raise_for_status()
             body = response.json()
         except (httpx.HTTPStatusError, ValueError) as exc:
-            raise EngineError("SeaTunnel 作业状态查询失败") from exc
+            raise EngineError(
+                f"SeaTunnel 作业状态查询失败（{_response_error_detail(response)}）"
+            ) from exc
         value = (
             str(body.get("status", body.get("jobStatus", "unknown"))).lower()
             if isinstance(body, dict)

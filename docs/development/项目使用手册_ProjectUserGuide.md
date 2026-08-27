@@ -49,6 +49,28 @@ $env:LLM_REAL_SMOKE_ENABLED = "false"
 
 预期结果：测试通过，返回结构化 JSON 对象和 64 位响应摘要。若出现 `LLM_REQUEST_REJECTED`，优先检查模型名称、百炼账号权限、地域 Base URL 和额度；若出现 `LLM_TIMEOUT` 或 `LLM_NETWORK_ERROR`，检查代理、防火墙和网络连通性。不要把 API Key 粘贴到 Issue、日志或截图中。
 
+## 2.2 全流程产物与上下游
+
+系统把一次 ETL 请求拆成可审查的阶段。每个阶段只消费上游已经确认的事实，并把产物交给下一阶段：
+
+| 阶段 | 上游输入 | 本阶段产物 | 下游用途 |
+| --- | --- | --- | --- |
+| 项目与连接 | 用户、项目和 SecretRef | 项目成员关系、连接登记 | Profile 探查按项目和凭据边界执行 |
+| Profile | 只读连接、表名范围 | 字段类型、主键、行数估计、脱敏样本、指纹 | Agent 判断字段是否存在、类型是否兼容 |
+| 需求与澄清 | 业务描述、源/目标 Profile | 完整需求参数和澄清答案 | 生成图复用同一 `thread_id` 继续运行 |
+| Agent 生成 | 需求上下文、Profile 摘要、JSON Schema | EtlPlan、HOCON、校验问题、响应摘要 | 确定性门禁和版本冻结 |
+| Prepare | 已通过门禁的不可变版本 | 风险级别、审批槽、冻结 Profile 指纹、过期时间 | Checker 只审批这组冻结事实 |
+| Approve | Preparation 和 Checker 职责槽 | 每个审批槽的决定 | 全部通过后才允许 Operator Commit |
+| Commit | 审批事实、制品摘要和权限 | ExecutionRun、单次 Capability、Outbox 事件 | Worker 验签后投递 SeaTunnel |
+| 数据面与监督 | ExecutionRun、SeaTunnel 作业 | 输入/输出/拒绝指标、影子表、错误表、质量结论 | 达标原子 Swap，失败清理或回滚 |
+| 审计与 Benchmark | 运行事件和固定测试参数 | Evidence Ledger、Benchmark 报告 | 复盘、回归和后续策略评审 |
+
+Pipeline Studio 的 Agent 面板会把上述生成阶段显示为真实节点轨迹：每一行都标出“上游输入、本阶段动作、已产出、下游用途”。“已完成”只表示后端 `AgentRun.node_trace` 已落库，不是前端估算的百分比；候选 EtlPlan/HOCON 和审查对话可在 Prepare 前检查。
+
+### 2.3 当前能力边界
+
+当前真实数据面首期支持单源表到单目标表、字段直接映射/重命名、白名单 `CAST` 和数值比较 `FILTER`，并完成影子表、拒绝行错误表、质量监督、原子 Swap/Rollback。`mask`、`fill_null`、CDC/增量水位执行、Join、聚合、多表编排、文件/API 数据面和完整异构连接器仍属于后续扩展；Agent 可以识别并澄清这些需求，但不会把未实现能力伪装成可执行作业。
+
 ## 3. 启动项目
 
 ### 3.1 启动 Ubuntu VM 基础设施
@@ -92,6 +114,22 @@ Invoke-RestMethod http://127.0.0.1:8000/health | ConvertTo-Json -Depth 5
 
 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel 应显示 `ok/ready`；LLM 应显示 `configured`。
 
+### 3.3 启动 Celery Worker 和 Beat
+
+异步 Agent 生成、Outbox 投递和运行监督由独立的 Celery 进程执行，FastAPI 不会代替它们运行。在项目根目录分别打开两个终端：
+
+```powershell
+# 终端 A：消费 Agent/Outbox/监督任务
+uv run celery -A etl_agent.workers.celery_app.celery_app worker --loglevel=INFO --pool=solo
+```
+
+```powershell
+# 终端 B：按周期发布待处理 Outbox
+uv run celery -A etl_agent.workers.celery_app.celery_app beat --loglevel=INFO
+```
+
+Windows Worker 必须使用仓库中的最新代码；修改 `src/etl_agent/workers/tasks.py` 后需要停止并重新执行上面的 Worker 命令。生成失败时优先查看 Worker 终端，FastAPI 终端通常只会看到 `202 Accepted` 和 AgentRun 轮询请求；控制台中的 `AgentRun.error_code`、`error_detail` 和 `node_trace` 才是任务结果。
+
 ## 4. 推荐演示数据
 
 启动合成 MySQL 后，在 Windows 项目根目录执行：
@@ -116,8 +154,8 @@ uv run python scripts/seed_synthetic_mysql.py --rows 10000 --batch-size 1000
 | 4 | 点击连接“测试” | Vault SecretProvider、MySQL `SELECT 1` 只读探针 | 显示“连接成功且只读探针通过” |
 | 5 | 点击“探查” | Schema、近似行数、脱敏样本和 Profile 指纹 | 生成 Profile，页面显示行数和 Profile ID |
 | 6 | Pipeline Studio 创建草稿版本 | Pipeline 和不可变版本基础 | 创建草稿版本，状态为草稿 |
-| 7 | 在 Studio 中从下拉框选择源/目标 Profile，填写业务需求并点击“运行生成” | LangGraph、百炼结构化候选、确定性门禁 | 成功时版本变为已就绪/不可变 |
-| 8 | 点击“Prepare” | 风险评估、资源预算、Profile 指纹冻结 | 生成 Preparation 和审批槽 |
+| 7 | 在 Studio 中从下拉框选择源/目标 Profile，填写业务需求并点击“运行生成” | LangGraph、百炼结构化候选、确定性门禁 | Studio 显示 Agent 节点实时进度；若缺参数出现澄清对话，完成后版本变为已就绪/不可变 |
+| 8 | 查看 Agent 生成面板，必要时提交澄清答案，再点击“Prepare” | AgentRun 持久化、Checkpoint 恢复、风险评估和 Profile 指纹冻结 | 只有生成完成才可 Prepare；页面明确风险级别和所需 Checker |
 | 9 | 审批工作台查看并处理审批 | 四眼原则、Maker 自批拦截 | 未完成审批不能 Commit |
 | 10 | 审批完成后点击“Commit” | Capability、指纹复核、ExecutionRun、Outbox | 生成受管执行记录，不直接操作目标库 |
 | 11 | 运行中心查看状态并测试取消/回滚 | Worker、监督、质量分流和回滚入口 | 状态和动作可追踪，重复请求保持幂等 |
@@ -154,7 +192,8 @@ uv run python scripts/seed_synthetic_mysql.py --rows 10000 --batch-size 1000
 
 - 测试功能：PipelineVersion、LangGraph 工作流、远端百炼结构化输出、Schema/HOCON 门禁。
 - 操作：先在“连接与 Profile”点击“读取最近 Profile”或完成一次“探查”，再进入 Studio 创建 `orders_sync` 草稿；业务需求填写“同步订单到目标表，保留 id、amount 和 updated_at”；源 Profile 和目标 Profile 从下拉框选择。学习阶段没有 Doris Profile 时，可以暂时选择同一合成 MySQL Profile 演示控制面流程，并在记录中标注为模拟目标。
-- 预期：百炼返回候选后，服务端完成 Pydantic、字段引用、预算和 HOCON 校验；通过后版本变为 `ready` 且 `immutable=true`。
+- 预期：Studio 的 Agent 面板按顺序显示“意图解析 → Profile 上下文整理 → LLM 候选生成 → 结构化校验 → HOCON 编译 → 确定性门禁”；百炼返回候选后，服务端完成 Pydantic、字段引用、预算和 HOCON 校验；通过后版本变为 `ready` 且 `immutable=true`。
+- 澄清场景：业务需求写“做增量同步”但不指定增量字段时，状态显示“等待澄清”，在对话框填写 `incremental_field` 后点击“提交澄清并继续”；服务端复用原 AgentRun 的 Checkpoint，不会新建一条无关任务。
 - 无百炼调用时：使用 `uv run pytest -m "not integration"` 验证 Fake Provider 和全部确定性门禁；前端真实生成失败属于未启用真实 Provider 的预期结果。
 - 负例：未读取 Profile 时“运行生成”按钮应禁用；后端收到不存在的 Profile UUID 时应显示“Profile 不存在或不属于当前项目”；非法候选不能冻结版本。
 

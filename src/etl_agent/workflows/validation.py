@@ -1,6 +1,7 @@
 """EtlPlan 的 Schema、HOCON 和确定性门禁校验。"""
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -10,13 +11,75 @@ from pyhocon import ConfigFactory
 from etl_agent.domain.generation import (
     EtlPlan,
     GenerationRequest,
+    TransformOperation,
     ValidationIssue,
+)
+
+# 首期真实数据面只会把这两类转换编译成可执行的 MySQL 查询。
+_SUPPORTED_RUNTIME_TRANSFORMS = {TransformOperation.FILTER, TransformOperation.CAST}
+
+# 这些关键词代表当前编译器尚未具备的语义；在门禁层明确拒绝，避免把复杂需求静默降级为全量直迁。
+_UNSUPPORTED_REQUEST_MARKERS = (
+    ("增量", "增量水位执行"),
+    ("incremental", "增量水位执行"),
+    ("cdc", "CDC 实时同步"),
+    ("脱敏", "字段脱敏"),
+    ("mask", "字段脱敏"),
+    ("填充空值", "空值填充"),
+    ("fill_null", "空值填充"),
+    ("join", "Join 多表关联"),
+    ("关联", "Join 多表关联"),
+    ("聚合", "聚合计算"),
+    ("aggregate", "聚合计算"),
 )
 
 
 def _issue(code: str, message: str, path: list[str | int] | None = None) -> ValidationIssue:
     """创建统一格式的校验问题，避免把第三方异常原文直接暴露给 API。"""
     return ValidationIssue(code=code, message=message, path=path or [])
+
+
+def _requested_marker(text: str, marker: str) -> bool:
+    """判断业务需求是否真正请求某个未支持能力，忽略常见的否定表达。"""
+    normalized = text.lower()
+    start = 0
+    while True:
+        index = normalized.find(marker, start)
+        if index < 0:
+            return False
+        prefix = normalized[max(0, index - 4) : index]
+        if not any(
+            negation in prefix for negation in ("不", "不要", "无需", "无须", "禁止", "not ")
+        ):
+            return True
+        start = index + len(marker)
+
+
+def _normalize_legacy_mapping_transform(payload: dict[str, Any]) -> dict[str, Any]:
+    """兼容模型把字段转换误写成嵌套 TransformRule 的历史候选格式。"""
+    normalized = deepcopy(payload)
+    mappings = normalized.get("field_mappings")
+    if not isinstance(mappings, list):
+        return normalized
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        transform = mapping.get("transform")
+        if not isinstance(transform, dict):
+            continue
+        operation = transform.get("operation")
+        source_fields = transform.get("source_fields", [])
+        target_field = transform.get("target_field")
+        parameters = transform.get("parameters", {})
+        # 只有结构完全对应当前字段映射时才归一化，其他对象继续交给 Schema 拒绝。
+        if (
+            operation in {"rename", "cast"}
+            and source_fields in ([], [mapping.get("source_field")])
+            and target_field in (None, mapping.get("target_field"))
+            and parameters in ({}, None)
+        ):
+            mapping["transform"] = operation
+    return normalized
 
 
 def parse_plan_payload(payload: Any) -> tuple[EtlPlan | None, list[ValidationIssue]]:
@@ -28,6 +91,9 @@ def parse_plan_payload(payload: Any) -> tuple[EtlPlan | None, list[ValidationIss
             return None, [_issue("INVALID_JSON", "候选内容不是合法 JSON")]
     if not isinstance(payload, dict):
         return None, [_issue("INVALID_OBJECT", "候选内容必须是 JSON 对象")]
+    # LLM 偶尔会将 field_mappings.transform 误当作完整 TransformRule；
+    # 这里仅兼容结构无歧义的 rename/cast，不放宽任意脚本或未知操作。
+    payload = _normalize_legacy_mapping_transform(payload)
     schema = EtlPlan.model_json_schema()
     schema_errors = sorted(
         Draft202012Validator(schema).iter_errors(payload), key=lambda error: list(error.path)
@@ -155,6 +221,27 @@ def deterministic_gate(
                 )
     if hocon_config is None:
         issues.append(_issue("HOCON_CONFIG_MISSING", "未找到已经编译的 HOCON 配置"))
+
+    # 先检查冻结需求和候选转换，阻止模型把未实现语义改写成看似成功的全量作业。
+    for marker, feature_name in _UNSUPPORTED_REQUEST_MARKERS:
+        if _requested_marker(request.business_request, marker):
+            issues.append(
+                _issue(
+                    "UNSUPPORTED_DATA_PLANE_FEATURE",
+                    f"当前真实数据面暂不支持{feature_name}，不会生成可执行版本",
+                    ["business_request"],
+                )
+            )
+            break
+    for index, transform in enumerate(plan.transforms):
+        if transform.operation not in _SUPPORTED_RUNTIME_TRANSFORMS:
+            issues.append(
+                _issue(
+                    "UNSUPPORTED_DATA_PLANE_TRANSFORM",
+                    f"当前真实数据面暂不支持 {transform.operation.value} 转换",
+                    ["transforms", index, "operation"],
+                )
+            )
     return issues
 
 

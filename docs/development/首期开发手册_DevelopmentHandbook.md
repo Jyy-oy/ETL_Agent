@@ -61,9 +61,34 @@ uv run uvicorn etl_agent.main:app --loop etl_agent.main:selector_event_loop_fact
 - 候选必须通过 Pydantic/JSON Schema、Profile/字段引用、预算上限和 PyHOCON 编译校验；非法候选最多自动修复一次，超限返回 `validation_failed`，不能冻结版本。
 - `POST /api/v1/pipelines` 创建 Pipeline，`POST /api/v1/pipelines/{pipeline_id}/versions` 创建草稿，`POST /api/v1/versions/{version_id}/generation` 运行生成；门禁通过才写入 SHA-256 摘要并将版本标记为 immutable。
 - PostgreSQL Checkpoint 使用 `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`；API 每次生成使用配置的 `LANGGRAPH_CHECKPOINT_DATABASE_URL`，生产部署应确保同一 thread_id 复用同一数据库。
-- Windows/PyCharm 入口 `src/etl_agent/main.py` 会切换到 `WindowsSelectorEventLoopPolicy`，因为 psycopg 异步连接不支持默认 Proactor loop；不要直接绕过 `etl_agent.main:app` 创建异步 Checkpoint。
+- Windows/PyCharm 入口 `src/etl_agent/main.py` 会切换到 `WindowsSelectorEventLoopPolicy`，因为 psycopg 异步连接不支持默认 Proactor loop；不要直接绕过 `etl_agent.main:app` 创建异步 Checkpoint。Celery Worker 的同步任务入口同样通过 `asyncio.Runner` 使用 `SelectorEventLoop`，修改 Worker 代码后必须重启 Worker，否则旧进程仍会在第一个 LangGraph 节点前失败。
 - `POST /api/v1/agent-runs/{run_id}/answers` 会合并澄清答案，复用 AgentRun 的脱敏请求快照和原 `thread_id` 从 PostgreSQL Checkpoint 恢复；当前只允许更新澄清参数，不允许通过答案修改项目权限或资源预算。
-- 当前限制：真实百炼调用的集成验收留待配置非生产 API Key 后执行；本地单元测试使用 fake Provider，不会发送业务数据。
+- 控制台推荐使用 `POST /api/v1/versions/{version_id}/generation/async`：接口只创建 `AgentRun` 并返回 `202`，Celery Worker 执行 LangGraph，前端轮询 `GET /api/v1/agent-runs/{run_id}` 展示 `node_trace`、模型、修复次数、校验问题和澄清问题。状态为 `needs_clarification` 时，Maker 通过 `/answers` 提交答案后重新排队同一 AgentRun，继续原 `thread_id`；只有 `completed` 才允许进入 Prepare。
+- Worker 日志使用 `agent_generation_started`、`agent_generation_node`、`agent_generation_completed`、`agent_generation_failed` 事件名；Outbox 和运行监督分别使用 `outbox_dispatch_*`、`execution_supervision_*`。日志只记录资源 ID、节点、状态和摘要，不记录 API Key、密码、Capability 原文或业务样本。
+- 当前状态：已用非生产百炼配置完成一次真实订单生成和审查对话验收；本地单元测试继续使用 fake Provider，不发送业务数据。后续真实业务数据仍必须经过脱敏和出境确认。
+
+#### Agent 阶段产物契约
+
+Pipeline Studio 以 `node_trace` 为事实来源展示以下输入/输出链。新增节点时必须同时补充后端节点、状态持久化、前端阶段说明和测试：
+
+| 节点 | 输入 | 产物 | 下游 |
+| --- | --- | --- | --- |
+| `IntentParseNode` | 业务需求和 Profile 引用 | 完整参数或澄清问题 | 上下文整理/人工澄清 |
+| `ProfileEnrichmentNode` | 授权 Profile 摘要 | 脱敏 Schema 上下文 | LLM 候选生成 |
+| `CandidateGenerationNode` | 需求、上下文和 EtlPlan Schema | 候选 JSON、Provider/模型、响应摘要 | 结构化校验 |
+| `SchemaValidationNode` | 候选 JSON | EtlPlan 或带路径校验问题 | HOCON 编译/有界修复 |
+| `HoconCompileNode` | EtlPlan/HOCON | 可解析配置对象 | 确定性门禁 |
+| `DeterministicGateNode` | 全部校验结果 | 通过或拒绝事实 | 版本冻结/修复/停止 |
+| `RepairNode` | 校验问题和上一候选 | 受次数限制的下一轮请求 | 候选生成 |
+| `HumanInterruptNode` | 缺参或最终失败 | 澄清问题和 Checkpoint | Maker 回答后复用原 thread |
+
+页面的“当前阶段产物”必须显示“待执行，尚无产物”，不能根据时间或请求返回时间伪造进度。候选通过后才展示 EtlPlan、字段映射、质量规则和 HOCON；审查对话只能解释候选，不能修改冻结版本。
+
+#### 百炼调用证据
+
+真实调用路径为 `POST /generation/async → Celery Worker → CandidateGenerationNode → OpenAICompatibleProvider → {LLM_BASE_URL}/chat/completions`。Provider 日志使用 `llm_request_started`、`llm_request_retry`、`llm_request_completed`、`llm_request_failed` 和 `llm_request_skipped` 事件，只记录 Provider、模型、操作、耗时/重试次数、Prompt 字节数和响应摘要；不记录 API Key、完整 Prompt、样本或响应正文。
+
+排查调用次数不增加时按顺序检查：Worker 是否运行且已重启、AgentRun 是否进入 `CandidateGenerationNode`、是否在澄清节点暂停、是否因 Prompt 超限/配置缺失在网络调用前被跳过，以及 Worker 是否加载了最新 `.env`。FastAPI 返回 `202` 只代表入队，不能作为百炼已调用的证据；应查看 Worker 日志和 AgentRun 的 Provider/模型/尝试记录。
 
 ### 阶段 4：Harness 协议
 
@@ -81,6 +106,8 @@ uv run uvicorn etl_agent.main:app --loop etl_agent.main:selector_event_loop_fact
 - `supervise_execution_run` 会把引擎状态和指标写入 `runtime_supervision_snapshots`，按冻结 RuntimeBudget 执行行数、字节、时长、放大比和拒绝率硬中断判断；终态按 QualityContract 写入 `execution_quality_results`，通过后自动生成 `execution.swap` Outbox，失败或质量拒绝后自动生成 `execution.cleanup` Outbox。
 - `POST /api/v1/execution-runs/{id}/cancel`、`POST /api/v1/execution-runs/{id}/rollback` 和监督/质量查询接口已提供；动作均走 Outbox，重复请求保持幂等并写入 Evidence Ledger。
 - 已在 VM 用 SeaTunnel 2.3.10 验证 Zeta REST：提交 `POST /submit-job?format=hocon`（`text/plain` HOCON）、状态 `GET /job-info/{job_id}`（`jobStatus`/`jobId`）和取消 `POST /stop-job`（JSON `jobId`）。`SeaTunnelAdapter` 将原生指标转换为 `input_records`、`output_records`、`input_bytes`、`output_bytes`、`rejected_records`、`elapsed_seconds`；路径通过 `SEATUNNEL_*_PATH` 配置，不应散落在业务用例中。Doris 适配器负责影子表准备、失败清理、原子 Swap 和回滚，SeaTunnel 本身不提供这些目标库动作。
+- 真实数据面编译器已支持字段直接映射、重命名、白名单 `CAST` 和数值比较 `FILTER`；过滤条件会编译到 MySQL 源查询，类型转换使用 MySQL 方言白名单，源/目标类型一致时自动省略冗余 CAST。监督阶段会用同一白名单条件反向读取拒绝行并写入 Doris 错误表，同时把拒绝数纳入 `QualityContract`。`mask/fill_null`、CDC/增量参数化水位、Join、聚合和其他复杂转换仍未实现；Agent 门禁会先返回 `UNSUPPORTED_DATA_PLANE_FEATURE` 或 `UNSUPPORTED_DATA_PLANE_TRANSFORM`，不冻结版本、不触发无效修复，也不会提交 SeaTunnel 作业。
+- AgentRun 完成后，控制台会展示已通过结构化门禁的 EtlPlan/HOCON，并可通过 `/agent-runs/{run_id}/chat` 异步询问字段映射、过滤条件和执行文件；聊天消息保存在 PostgreSQL，不能修改权限、预算或冻结版本。
 - `scripts/seed_synthetic_mysql.py` 可向 Compose MySQL 写入确定性大批量演示数据；M5.5 已用该数据通过真实 MySQL → SeaTunnel → Doris 链路验收，输入/输出各 10,000 行并验证质量、原子发布和回滚。生产业务连接器、压测和高可用部署属于后续扩展。
 
 ### 阶段 6：前端和 Benchmark
@@ -158,3 +185,20 @@ uv run uvicorn etl_agent.main:app --loop etl_agent.main:selector_event_loop_fact
 - 一条合成 MySQL → Doris 真实链路通过 Profile、生成、门禁、审批、Commit、SeaTunnel、监督、质量报告、原子 Swap 和回滚验收；不要求真实业务数据库。
 - 关键安全规则有自动化测试：自批拦截、职责混用拦截、过期/重放 Capability 拦截、指纹变更拒绝、Outbox 幂等。
 - Benchmark 结果可复现并关联制品版本、策略版本和运行环境。
+
+## 7 当前完成度与后续扩展
+
+当前版本已经具备生产控制面思路和一条可运行的学习闭环，但不是“所有 ETL 类型都可执行”的完成版：
+
+| 能力 | 当前状态 |
+| --- | --- |
+| 控制面、认证、项目隔离、连接/Profile、Vault | 已实现并有自动化测试 |
+| LangGraph、澄清恢复、结构化候选、门禁、不可变版本 | 已实现；候选结果可在 Studio 审查 |
+| Prepare/双 Checker/Commit/Capability/Outbox/审计 | 已实现 |
+| 合成 MySQL → Doris、影子表、质量监督、Swap/Rollback | 已实现；首期约束为单源表/单目标表 |
+| 直接映射、重命名、白名单 CAST、数值 FILTER | 已实现 |
+| mask、fill_null、逐行错误表、Join、聚合 | 尚未实现，需求应进入后续数据面里程碑 |
+| CDC/增量实时同步、调度、文件/API 数据面、多表编排 | 尚未实现 |
+| PostgreSQL/Oracle/ClickHouse 等完整生产连接器、SSE/WebSocket、SSO | 尚未实现 |
+
+复杂需求可以先由 Agent 进行识别和澄清，但只有通过当前编译器和门禁的能力才会生成可执行版本；未支持的转换必须显示为限制或失败原因，不能静默降级为直迁。

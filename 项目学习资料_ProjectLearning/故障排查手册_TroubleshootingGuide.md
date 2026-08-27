@@ -55,6 +55,7 @@ curl http://127.0.0.1:8200/v1/sys/health
 | 只读 Profile 探查失败 | 连接主机、SecretRef、`information_schema` 返回键名 | Windows 访问 VM 时把旧连接的 `127.0.0.1` 改为 `192.168.181.128`；若连接测试通过但 Profile 失败，确认 Profile 代码兼容 MySQL 大写元数据列名，并重启 FastAPI |
 | LLM timeout | Base URL、DNS、API Key、百炼配额 | 先用 curl/最小客户端验证，再看 Workflow |
 | Agent 无法恢复 | thread_id、Checkpoint DB、状态版本 | 查 AgentRun 和 PostgreSQL checkpoint |
+| AgentRun 立即失败且 `node_trace` 为空（Windows） | Worker 事件循环、Worker 进程是否已重启 | 查看 Worker 终端；若出现 `Psycopg cannot use the 'ProactorEventLoop'`，重启使用最新代码的 Worker，确保其异步入口使用 Selector；FastAPI 终端不会显示 Worker 异常 |
 | Commit 被拒绝 | 指纹、审批槽、Capability、角色 | 查稳定错误码和 AuditEvent，不绕过检查 |
 | Worker 无任务 | Redis Broker、队列名、Outbox 状态 | 查队列、Outbox 和 Worker 日志 |
 | 作业失败 | SeaTunnel job ID、连接器、质量快照 | 先保留影子表和日志，再执行受管回滚 |

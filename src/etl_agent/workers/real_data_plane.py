@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from etl_agent.config import Settings
-from etl_agent.domain.generation import EtlPlan, TransformOperation
+from etl_agent.domain.generation import EtlPlan, FieldMapping, TransformOperation
 from etl_agent.infrastructure.models import Connection, ConnectionType, MetadataProfile
 from etl_agent.infrastructure.secrets import SecretProvider, SecretProviderError
 from etl_agent.workers.engine import EngineJobRef, EngineStatus, SeaTunnelAdapter
@@ -32,6 +32,39 @@ class RuntimeJobArtifact:
 
     hocon: str
     metadata: dict[str, str]
+
+
+_FILTER_PATTERN = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|<>|=|<|>)\s*"
+    r"(-?(?:\d+(?:\.\d*)?|\.\d+))\s*$"
+)
+# MySQL CAST 只接受有限的目标类型；Doris/通用 SQL 类型名不能直接复用。
+_MYSQL_CAST_TYPES = {
+    "bigint": "SIGNED",
+    "int": "SIGNED",
+    "integer": "SIGNED",
+    "smallint": "SIGNED",
+    "tinyint": "SIGNED",
+    "decimal": "DECIMAL(18,2)",
+    "numeric": "DECIMAL(18,2)",
+    "double": "DOUBLE",
+    "float": "FLOAT",
+    "date": "DATE",
+    "datetime": "DATETIME",
+    "timestamp": "DATETIME",
+    "char": "CHAR(255)",
+    "varchar": "CHAR(255)",
+    "text": "CHAR(255)",
+    "boolean": "SIGNED",
+    "bool": "SIGNED",
+}
+
+
+_PROFILE_TYPE_ALIASES = {
+    "integer": "int",
+    "numeric": "decimal",
+    "bool": "boolean",
+}
 
 
 def _quote_identifier(value: str) -> str:
@@ -64,6 +97,92 @@ def _single_table(profile: MetadataProfile, label: str) -> tuple[dict[str, Any],
     if not fields:
         raise RuntimeCompilationError(f"{label} Profile 没有可用字段")
     return table, fields
+
+
+def _profile_column_types(profile: MetadataProfile) -> dict[str, str]:
+    """读取 Profile 中的字段类型，供安全 CAST 白名单使用。"""
+    tables = profile.schema_snapshot.get("tables")
+    if not isinstance(tables, list) or len(tables) != 1 or not isinstance(tables[0], dict):
+        return {}
+    columns = tables[0].get("columns")
+    if not isinstance(columns, list):
+        return {}
+    return {
+        str(column["name"]): str(column.get("data_type", "")).lower()
+        for column in columns
+        if isinstance(column, dict) and column.get("name")
+    }
+
+
+def _cast_type(profile_type: str, field: str) -> str:
+    """把 Profile 类型转换为 MySQL 固定 SQL 类型，拒绝模型自定义类型片段。"""
+    normalized = _normalize_profile_type(profile_type)
+    cast_type = _MYSQL_CAST_TYPES.get(normalized)
+    if cast_type is None:
+        raise RuntimeCompilationError(f"字段 {field} 的类型不在真实数据面 CAST 白名单中")
+    return cast_type
+
+
+def _normalize_profile_type(profile_type: str) -> str:
+    """去除类型参数并归一化安全的 Profile 类型别名。"""
+    base_type = profile_type.strip().lower().split("(", 1)[0].strip()
+    return _PROFILE_TYPE_ALIASES.get(base_type, base_type)
+
+
+def _same_profile_type(source_type: str, target_type: str) -> bool:
+    """判断源、目标 Profile 类型是否相同，避免生成没有意义的 CAST。"""
+    return _normalize_profile_type(source_type) == _normalize_profile_type(target_type)
+
+
+def _compile_filter_condition(condition: str, source_fields: set[str]) -> str:
+    """编译单个数值比较过滤条件，避免把模型文本直接拼接进 SQL。"""
+    matched = _FILTER_PATTERN.fullmatch(condition)
+    if matched is None:
+        raise RuntimeCompilationError("真实数据面过滤条件只支持字段与数值的简单比较")
+    field, operator, value = matched.groups()
+    if field not in source_fields:
+        raise RuntimeCompilationError(f"过滤条件引用了不存在的源字段: {field}")
+    return f"{_quote_identifier(field)} {operator} {value}"
+
+
+def _filter_parameter(rule: Any) -> str:
+    """读取过滤规则条件，并兼容历史候选曾使用的 expression 参数名。"""
+    parameters = rule.parameters
+    condition = parameters.get("condition")
+    if isinstance(condition, str) and condition.strip():
+        return condition
+    # 历史版本的 LLM 候选曾把同一语义命名为 expression，不能让已冻结版本失效。
+    expression = parameters.get("expression")
+    if isinstance(expression, str) and expression.strip():
+        return expression
+    raise RuntimeCompilationError("过滤转换缺少 condition 参数（兼容旧版本的 expression）")
+
+
+def _mapping_expression(
+    source_field: str,
+    target_field: str,
+    transform: TransformOperation | None,
+    source_types: dict[str, str],
+    target_types: dict[str, str],
+) -> str:
+    """生成一个字段映射 SQL 表达式，只允许直接映射、重命名和类型转换。"""
+    if transform not in {None, TransformOperation.RENAME, TransformOperation.CAST}:
+        raise RuntimeCompilationError("真实数据面字段映射只支持直接映射、重命名和 CAST")
+    source_sql = _quote_identifier(source_field)
+    alias = _quote_identifier(target_field)
+    cast_applied = False
+    if transform is TransformOperation.CAST:
+        source_type = source_types.get(source_field, "")
+        target_type = target_types.get(target_field) or source_types.get(source_field)
+        if not target_type:
+            raise RuntimeCompilationError(f"字段 {target_field} 缺少可用于 CAST 的 Profile 类型")
+        # 源、目标类型一致时直接映射，避免 MySQL 不支持的冗余类型名和无效转换。
+        if not source_type or not _same_profile_type(source_type, target_type):
+            source_sql = f"CAST({source_sql} AS {_cast_type(target_type, target_field)})"
+            cast_applied = True
+    if source_field != target_field or cast_applied:
+        return f"{source_sql} AS {alias}"
+    return source_sql
 
 
 async def _load_profile_connection(
@@ -111,23 +230,71 @@ async def compile_runtime_job(
         raise RuntimeCompilationError("真实数据面目标连接必须是 Doris")
     source_table, source_fields = _single_table(source_profile, "源")
     target_table, target_fields = _single_table(target_profile, "目标")
+    source_types = _profile_column_types(source_profile)
+    target_types = _profile_column_types(target_profile)
     if not plan.field_mappings:
         raise RuntimeCompilationError("ETL 方案没有字段映射")
 
-    query_fields: list[str] = []
-    target_columns: list[str] = []
+    mapping_expressions: dict[str, str] = {}
+    mapping_models: dict[str, FieldMapping] = {}
     for mapping in plan.field_mappings:
         if mapping.source_field not in source_fields:
             raise RuntimeCompilationError(f"源字段不存在: {mapping.source_field}")
         if mapping.target_field not in target_fields:
             raise RuntimeCompilationError(f"目标字段不存在: {mapping.target_field}")
-        if mapping.transform not in {None, TransformOperation.RENAME}:
-            raise RuntimeCompilationError("真实数据面首期仅支持直接映射和重命名")
-        source_expr = _quote_identifier(mapping.source_field)
-        if mapping.source_field != mapping.target_field:
-            source_expr += f" AS {_quote_identifier(mapping.target_field)}"
-        query_fields.append(source_expr)
-        target_columns.append(_quote_identifier(mapping.target_field))
+        mapping_models[mapping.target_field] = mapping
+        mapping_expressions[mapping.target_field] = _mapping_expression(
+            mapping.source_field,
+            mapping.target_field,
+            mapping.transform,
+            source_types,
+            target_types,
+        )
+
+    # JDBC 结果按 SELECT 顺序写入 Doris；以目标 Profile 列顺序重排，避免模型返回顺序造成错列。
+    target_column_order = [
+        str(column.get("name"))
+        for column in target_table.get("columns", [])
+        if isinstance(column, dict) and column.get("name") in mapping_expressions
+    ]
+    query_fields = [mapping_expressions[field] for field in target_column_order]
+    mapping_by_target = {field: index for index, field in enumerate(target_column_order)}
+
+    filters: list[str] = []
+    for rule in plan.transforms:
+        if rule.operation is TransformOperation.FILTER:
+            filters.append(_compile_filter_condition(_filter_parameter(rule), source_fields))
+            continue
+        if rule.operation is TransformOperation.CAST:
+            if len(rule.source_fields) != 1:
+                raise RuntimeCompilationError("CAST 转换必须指定一个源字段")
+            source_field = rule.source_fields[0]
+            target_field = rule.target_field or source_field
+            if source_field not in source_fields or target_field not in target_fields:
+                raise RuntimeCompilationError("CAST 转换引用了不存在的字段")
+            index = mapping_by_target.get(target_field)
+            if index is None:
+                raise RuntimeCompilationError(f"CAST 目标字段未声明映射: {target_field}")
+            mapping = mapping_models[target_field]
+            query_fields[index] = _mapping_expression(
+                mapping.source_field,
+                mapping.target_field,
+                TransformOperation.CAST,
+                source_types,
+                target_types,
+            )
+            continue
+        raise RuntimeCompilationError("真实数据面当前仅支持 FILTER 和 CAST 转换，其他转换暂未实现")
+
+    # QualityContract 的必填目标字段必须在源查询中排除 NULL；反向查询同时把这些行送入错误表，
+    # 避免 SQL 三值逻辑让不合规记录既没有进入目标表，也没有留下质量证据。
+    required_conditions: list[str] = []
+    for required_field in plan.quality_contract.required_fields:
+        mapping_model = mapping_models.get(required_field)
+        if mapping_model is None:
+            raise RuntimeCompilationError(f"质量必填字段未声明映射: {required_field}")
+        required_conditions.append(f"{_quote_identifier(mapping_model.source_field)} IS NOT NULL")
+    accept_conditions = [*filters, *required_conditions]
 
     source_credentials = await _read_credentials(provider, source_connection, "源")
     target_credentials = await _read_credentials(provider, target_connection, "目标")
@@ -144,9 +311,13 @@ async def compile_runtime_job(
     _quote_identifier(target_database)
     _quote_identifier(target_name)
     suffix = execution.id.hex[:12]
-    # Doris 标识符长度留出动作后缀空间，避免长目标表名使作业提交失败。
-    shadow_name = f"{target_name[:39]}__shadow_{suffix}"
-    error_name = f"{target_name[:39]}__errors_{suffix}"
+    # 错误表后缀来自冻结的 QualityContract；先限制为 Doris 标识符，避免模型文本进入 DDL。
+    error_suffix = plan.quality_contract.error_table_suffix.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", error_suffix):
+        raise RuntimeCompilationError("错误表后缀只能包含字母、数字和下划线")
+    # Doris 标识符最多 64 个字符，按实际后缀长度为动作名预留空间。
+    shadow_name = f"{target_name[: 64 - len('__shadow_') - len(suffix) - 1]}__shadow_{suffix}"
+    error_name = f"{target_name[: 64 - len(error_suffix) - len(suffix) - 1]}{error_suffix}_{suffix}"
     _quote_identifier(shadow_name)
     _quote_identifier(error_name)
 
@@ -155,6 +326,23 @@ async def compile_runtime_job(
         + ", ".join(query_fields)
         + f" FROM {_quote_identifier(source_schema)}.{_quote_identifier(source_name)}"
     )
+    if accept_conditions:
+        query += " WHERE " + " AND ".join(accept_conditions)
+    error_query = ""
+    if accept_conditions:
+        # 条件已经过白名单编译；反向查询只读取拒绝行，供错误表回收使用。
+        # MySQL 的 NULL 比较结果为 UNKNOWN；补充 IS NULL 分支，确保未知条件也进入错误表。
+        accept_expression = " AND ".join(accept_conditions)
+        error_query = (
+            "SELECT "
+            + ", ".join(query_fields)
+            + f" FROM {_quote_identifier(source_schema)}.{_quote_identifier(source_name)}"
+            + " WHERE NOT ("
+            + accept_expression
+            + ") OR ("
+            + accept_expression
+            + ") IS NULL"
+        )
     source_url = (
         f"jdbc:mysql://{settings.seatunnel_mysql_host}:{source_connection.port}/"
         f"{source_database}?useSSL=false&serverTimezone=UTC"
@@ -201,6 +389,13 @@ sink {{
         "target_table": target_name,
         "shadow_table": shadow_name,
         "error_table": error_name,
+        "source_host": source_connection.host,
+        "source_port": str(source_connection.port),
+        "source_secret_ref": source_connection.secret_ref,
+        "source_database": source_database,
+        "source_table": f"{source_schema}.{source_name}",
+        "error_query": error_query,
+        "error_columns": ",".join(target_column_order),
     }
     return {"hocon": hocon, **metadata}
 
@@ -277,6 +472,103 @@ class DorisTargetAdapter:
             raise RuntimeCompilationError("Doris 目标凭据不完整")
         return {"username": username, "password": password}
 
+    async def _source_credentials(self, payload: dict[str, Any]) -> dict[str, str]:
+        """运行时解析源端 SecretRef，拒绝把源端密码写入执行事实。"""
+        secret_ref = str(payload.get("source_secret_ref", "")).strip()
+        if not secret_ref:
+            raise RuntimeCompilationError("MySQL 源端缺少 SecretRef")
+        try:
+            values = dict(await self.provider.read(secret_ref))
+        except SecretProviderError as exc:
+            raise RuntimeCompilationError("MySQL 源端 SecretRef 无法解析") from exc
+        username = values.get("username")
+        password = values.get("password")
+        if not username or password is None:
+            raise RuntimeCompilationError("MySQL 源端凭据不完整")
+        return {"username": username, "password": password}
+
+    @staticmethod
+    def _read_rows(connection: Any, query: str) -> list[tuple[Any, ...]]:
+        """读取已经由编译器生成的拒绝行查询结果。"""
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            return list(cursor.fetchall())
+
+    @staticmethod
+    def _write_rows(connection: Any, statement: str, rows: list[tuple[Any, ...]]) -> None:
+        """批量写入错误表，值使用驱动参数绑定而不是字符串拼接。"""
+        with connection.cursor() as cursor:
+            cursor.executemany(statement, rows)
+
+    async def capture_rejected_rows(self, payload: dict[str, Any]) -> int:
+        """把 FILTER 反向查询得到的不合规行写入 Doris 错误表。"""
+        query = str(payload.get("error_query", "")).strip()
+        if not query:
+            return 0
+        # 编译器只会生成 SELECT；额外检查防止运行事实被篡改后执行多条语句。
+        if not query.upper().startswith("SELECT ") or ";" in query:
+            raise RuntimeCompilationError("错误行查询不是受控 SELECT")
+        columns = [item.strip() for item in str(payload.get("error_columns", "")).split(",")]
+        if not columns or any(not item for item in columns):
+            raise RuntimeCompilationError("错误表缺少目标字段列表")
+        quoted_columns = ", ".join(_quote_identifier(item) for item in columns)
+        source_credentials = await self._source_credentials(payload)
+        source_host = str(payload.get("source_host", "")).strip()
+        source_database = str(payload.get("source_database", "")).strip()
+        try:
+            source_port = int(payload.get("source_port", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeCompilationError("MySQL 源端端口无效") from exc
+        if not source_host or not source_database or not source_port:
+            raise RuntimeCompilationError("MySQL 源端运行元数据不完整")
+        source_connection = await asyncio.to_thread(
+            pymysql.connect,
+            host=source_host,
+            port=source_port,
+            user=source_credentials["username"],
+            password=source_credentials["password"],
+            database=source_database,
+            connect_timeout=max(1, int(self.settings.health_check_timeout_seconds)),
+            read_timeout=max(1, int(self.settings.health_check_timeout_seconds)),
+        )
+        try:
+            rows = await asyncio.to_thread(self._read_rows, source_connection, query)
+        finally:
+            await asyncio.to_thread(source_connection.close)
+        await self._run_sql(payload, [f"TRUNCATE TABLE {self._table(payload, 'error_table')}"])
+        if not rows:
+            return 0
+        target_credentials = await self._credentials(payload)
+        target_host = str(payload.get("target_host", "")).strip()
+        target_database = str(payload.get("target_database", "")).strip()
+        try:
+            target_port = int(payload.get("target_port", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeCompilationError("Doris 目标端口无效") from exc
+        if not target_host or not target_database or not target_port:
+            raise RuntimeCompilationError("Doris 目标运行元数据不完整")
+        target_connection = await asyncio.to_thread(
+            pymysql.connect,
+            host=target_host,
+            port=target_port,
+            user=target_credentials["username"],
+            password=target_credentials["password"],
+            database=target_database,
+            connect_timeout=max(1, int(self.settings.health_check_timeout_seconds)),
+            read_timeout=max(1, int(self.settings.health_check_timeout_seconds)),
+            write_timeout=max(1, int(self.settings.health_check_timeout_seconds)),
+            autocommit=True,
+        )
+        try:
+            statement = (
+                f"INSERT INTO {self._table(payload, 'error_table')} "
+                f"({quoted_columns}) VALUES ({', '.join(['%s'] * len(columns))})"
+            )
+            await asyncio.to_thread(self._write_rows, target_connection, statement, rows)
+        finally:
+            await asyncio.to_thread(target_connection.close)
+        return len(rows)
+
     @staticmethod
     def _table(payload: dict[str, Any], key: str) -> str:
         """读取并引用运行元数据中的表名。"""
@@ -286,15 +578,18 @@ class DorisTargetAdapter:
         return _quote_identifier(value)
 
     async def prepare_shadow(self, payload: dict[str, Any]) -> None:
-        """按目标表结构创建并清空本次执行的影子表。"""
+        """按目标表结构创建影子表和错误表，并清空本次执行的临时数据。"""
         _quote_identifier(str(payload.get("target_database", "")))
         target = self._table(payload, "target_table")
         shadow = self._table(payload, "shadow_table")
+        error = self._table(payload, "error_table")
         await self._run_sql(
             payload,
             [
                 f"CREATE TABLE IF NOT EXISTS {shadow} LIKE {target}",
                 f"TRUNCATE TABLE {shadow}",
+                f"CREATE TABLE IF NOT EXISTS {error} LIKE {target}",
+                f"TRUNCATE TABLE {error}",
             ],
         )
 
@@ -351,6 +646,10 @@ class SeaTunnelDorisEngine:
     async def get_status(self, job_id: str) -> EngineStatus:
         """读取并复用 SeaTunnel 的稳定状态映射。"""
         return await self.seatunnel.get_status(job_id)
+
+    async def capture_rejected_rows(self, payload: dict[str, Any]) -> int:
+        """在主作业成功后回收 FILTER 拒绝行，供质量报告和错误表使用。"""
+        return await self.target.capture_rejected_rows(payload)
 
     async def cancel(self, job_id: str) -> bool:
         """通过 SeaTunnel REST 请求停止作业。"""

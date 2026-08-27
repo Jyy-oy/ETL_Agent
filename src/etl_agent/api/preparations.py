@@ -9,7 +9,12 @@ from fastapi import APIRouter, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from etl_agent.api.auth_dependencies import CurrentUser, DbSession, require_project_role
+from etl_agent.api.auth_dependencies import (
+    CurrentUser,
+    DbSession,
+    require_project_membership,
+    require_project_role,
+)
 from etl_agent.api.errors import ApiError
 from etl_agent.api.preparation_models import (
     ApprovalDecisionRequest,
@@ -346,11 +351,13 @@ async def decide_approval(
         required_role = ProjectRole(approval.required_role)
     except ValueError as exc:
         raise ApiError("APPROVAL_ROLE_INVALID", "审批槽职责无效", status_code=409) from exc
-    await require_project_role(preparation.project_id, current_user, session, {required_role})
+    # 先确认项目成员身份，再优先返回自审批提示，避免 Maker 只看到笼统的职责不足。
+    await require_project_membership(preparation.project_id, current_user, session)
     if current_user.id == preparation.created_by:
         raise ApiError(
             "SELF_APPROVAL_FORBIDDEN", "Preparation 创建人不得审批自己的申请", status_code=403
         )
+    await require_project_role(preparation.project_id, current_user, session, {required_role})
 
     approval.approver_id = current_user.id
     approval.decision = payload.decision.value

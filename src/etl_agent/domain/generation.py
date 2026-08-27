@@ -66,7 +66,7 @@ class QualityContract(GenerationModel):
 
     required_fields: list[str] = Field(default_factory=list, max_length=500)
     max_rejection_rate: float = Field(default=0.05, ge=0, le=1)
-    error_table_suffix: str = Field(default="__errors", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    error_table_suffix: str = Field(default="__errors", pattern=r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 
 
 class RuntimeBudget(GenerationModel):

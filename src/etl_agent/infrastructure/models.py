@@ -326,6 +326,16 @@ class AgentRun(TimestampMixin, Base):
     result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     repair_count: Mapped[int] = mapped_column(default=0, nullable=False)
     node_trace: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    clarification_questions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    validation_issues: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    chat_status: Mapped[str] = mapped_column(String(16), default="idle", nullable=False)
+    chat_messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    chat_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chat_error_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
 

@@ -1,5 +1,6 @@
 """Transactional Outbox 的受管消费和 Tool Broker 边界。"""
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,8 @@ from etl_agent.infrastructure.models import (
 )
 from etl_agent.workers.engine import EngineError, ExecutionEngine
 from etl_agent.workers.real_data_plane import RuntimeCompilationError
+
+logger = logging.getLogger(__name__)
 
 
 class DispatchError(RuntimeError):
@@ -59,6 +62,7 @@ async def dispatch_outbox_event(
     | None = None,
 ) -> DispatchResult:
     """锁定并消费一个 Outbox 事件，所有外部副作用只从此 Tool Broker 出口发起。"""
+    logger.info("outbox_event_processing event_id=%s", event_id)
     event = await session.scalar(
         select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
     )
@@ -154,6 +158,11 @@ async def dispatch_outbox_event(
         execution.error_code = "OUTBOX_DISPATCH_FAILED"
         execution.error_detail = detail
         await session.commit()
+        logger.warning(
+            "outbox_event_failed event_id=%s execution_run_id=%s error_code=OUTBOX_DISPATCH_FAILED",
+            event.id,
+            execution.id,
+        )
         raise DispatchError(detail) from exc
 
     now = datetime.now(UTC)
@@ -166,6 +175,11 @@ async def dispatch_outbox_event(
         safe_runtime_fields = {
             key: payload[key]
             for key in (
+                "source_host",
+                "source_port",
+                "source_secret_ref",
+                "source_database",
+                "source_table",
                 "target_connection_id",
                 "target_host",
                 "target_port",
@@ -174,6 +188,8 @@ async def dispatch_outbox_event(
                 "target_table",
                 "shadow_table",
                 "error_table",
+                "error_query",
+                "error_columns",
             )
             if key in payload
         }
@@ -205,6 +221,13 @@ async def dispatch_outbox_event(
         payload={"event_id": str(event.id), "engine_job_id": execution.engine_job_id},
     )
     await session.commit()
+    logger.info(
+        "outbox_event_published event_id=%s execution_run_id=%s event_type=%s engine_job_id=%s",
+        event.id,
+        execution.id,
+        event.event_type,
+        execution.engine_job_id or "-",
+    )
     return DispatchResult(
         event_id=event.id,
         execution_run_id=execution.id,

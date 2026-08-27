@@ -53,7 +53,10 @@
 | POST | `/pipelines` | 创建 Pipeline | Maker |
 | POST | `/pipelines/{pipeline_id}/versions` | 创建可生成草稿版本 | Maker/Operator |
 | POST | `/versions/{version_id}/generation` | 启动/恢复生成 | Maker |
+| POST | `/versions/{version_id}/generation/async` | 异步启动 Agent 生成并返回 AgentRun | Maker |
+| GET | `/agent-runs/{run_id}` | 查询 Agent 节点进度、澄清问题和校验结果 | Project Member |
 | POST | `/agent-runs/{run_id}/answers` | 提交澄清回答 | Maker |
+| POST | `/agent-runs/{run_id}/chat` | 对已完成候选提交一次异步审查问题 | Maker |
 | GET | `/versions/{version_id}/design` | 查询 EtlPlan/HOCON/质量规则 | Project Member |
 | POST | `/versions/{version_id}/prepare` | 冻结 Preparation | Maker |
 | GET | `/projects/{project_id}/preparations` | 查询 Preparation 与审批槽 | Project Member |
@@ -88,6 +91,8 @@
 M4.4/M5 已实现 Commit 与 ExecutionRun 查询：首次 Commit 返回 `201`，重复 Preparation 或相同 `Idempotency-Key` 返回 `200`；服务端会返回 `PREPARATION_FINGERPRINT_MISMATCH`、`APPROVALS_INCOMPLETE`、`CAPABILITY_ISSUE_FAILED` 等稳定错误码。Commit 响应只返回 `capability_token_digest`，不返回 Capability 原文。取消和回滚返回 `202`，状态通过 ExecutionRun、监督快照和质量报告查询；外部动作不由 API 直接调用。
 
 M6/M6.1 新增控制台所需的项目级列表查询，列表仅按当前用户项目成员关系过滤。`POST /benchmarks/run` 在首期同步返回确定性合成报告（`200`），并将同一报告摘要写入 PostgreSQL `benchmark_runs`；`GET /projects/{project_id}/benchmarks` 默认返回最近 20 条，`GET /benchmarks/{benchmark_id}` 返回单条报告。报告绑定项目、Benchmark 级别、数据摘要、制品摘要、策略版本和环境；它不访问真实业务数据库，也不保存业务样本。
+
+异步生成、澄清答案和候选审查接口都返回 `202` 和 `AgentRunResponse`。客户端应使用返回的 `id` 轮询 `GET /agent-runs/{run_id}`，直到生成进入 `completed`、`needs_clarification`、`validation_failed` 或 `failed`；审查对话另由 `chat_status`（`idle/queued/running/completed/failed`）表示，聊天处理中仍需继续轮询。`node_trace` 是已持久化的 LangGraph 节点顺序；`clarification_questions` 只在 `needs_clarification` 时出现，Maker 通过 `/answers` 提交键值答案，服务端更新请求快照并重新排队同一 Worker，复用原 `thread_id` 从 PostgreSQL Checkpoint 恢复。生成完成后响应中的 `plan` 是已通过结构化门禁的 EtlPlan/HOCON，`chat_messages` 只保存审查对话文本；响应不会返回完整 Prompt、凭据或业务样本。
 
 开发环境注册接口可额外提交 `project_code` 与 `project_role`（仅支持 `checker_1`、`checker_2`），注册成功后自动建立项目成员关系和对应职责槽；两个字段必须同时提供。未提供时仍按普通本地账号注册，不自动加入项目。
 

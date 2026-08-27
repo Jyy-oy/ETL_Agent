@@ -28,6 +28,7 @@
 - [首期开发手册](development/首期开发手册_DevelopmentHandbook.md)：实施顺序、Harness 规则、测试矩阵和完成定义。
 - [项目使用手册](development/项目使用手册_ProjectUserGuide.md)：启动、百炼配置、控制台操作和带功能标注的模拟测试步骤。
 - [项目测试手册](development/项目测试手册_ProjectTestingGuide.md)：自动化、集成、浏览器、API 冒烟和合成数据面验收步骤。
+- [需求 A-F 真实验收记录](development/需求A-F真实验收记录_RealAcceptanceReport.md)：真实依赖链路、发现问题、修复证据和当前边界。
 - [M6 控制台源码](../frontend/)：Vue 3 + Vite 控制台，覆盖连接/Profile、Studio、审批、运行中心和 Benchmark。
 
 ## 运维

@@ -84,10 +84,10 @@ uv run pytest tests/integration/test_m3_runtime.py -m integration -k real_bailia
 
 1. 打开控制台，选择“开发环境注册账号”；用户名至少 3 位，只允许字母、数字、下划线、点和短横线；密码至少 8 位。
 2. 注册成功后，首次进入会显示“创建学习项目”；输入项目编码和名称并创建项目。
-3. 进入“连接与 Profile”，登记合成 MySQL 连接。Windows/PyCharm 访问 VM 上的 MySQL 时，主机必须填写 `192.168.181.128`，不能填写 `127.0.0.1`；已有旧连接可点击“编辑”修正主机和 SecretRef 后再点击“测试”。首期可以只验证 API 表单和脱敏 SecretRef；真实探查前需在 Vault 写入对应 Secret。
-4. 进入“Pipeline Studio”，创建草稿版本；先在“连接与 Profile”读取最近 Profile，再从源/目标下拉框选择 Profile，运行生成。没有真实百炼 Key 时使用后端单元测试或 Fake Provider，前端真实生成会因 LLM 配置不可用而失败，这是预期限制。
-5. 进入“审批工作台”，验证 Preparation 状态和 Checker 槽。创建者不能审批自己的申请，服务端拒绝属于预期结果。
-6. 进入“运行中心”，查看 ExecutionRun、质量、发布、回滚状态；取消和回滚只能登记 Outbox 动作，不在浏览器直接操作数据库。若目标 Profile 包含多张表，运行中心应显示中文编译错误和具体原因，不应创建 SeaTunnel 作业。
+3. 进入“连接与 Profile”，点击“MySQL 8.0”预设登记合成 MySQL；Windows/PyCharm 访问 VM 上的 MySQL 时，主机必须填写 `192.168.181.128`，不能填写 `127.0.0.1`；已有旧连接可点击“编辑”修正主机和 SecretRef 后再点击“测试”。探查后表名输入框会根据 Profile 提供自动建议，真实数据面请选单个业务表。
+4. 进入“Pipeline Studio”，创建草稿版本；先在“连接与 Profile”读取最近 Profile，再从源/目标下拉框选择 Profile，运行生成。观察 Agent 面板的节点、模型、修复次数和校验问题；若出现“等待澄清”，填写问题答案并提交，确认同一 Run 继续运行。没有真实百炼 Key 时使用后端单元测试或 Fake Provider，前端真实生成会因 LLM 配置不可用而失败，这是预期限制。
+5. 进入“审批工作台”，验证 Preparation 状态、风险级别和“需要审批：Checker 1/Checker 2”说明。创建者不能审批自己的申请，服务端拒绝属于预期结果。
+6. 进入“运行中心”，查看 Pipeline/版本业务名称、ExecutionRun 次要 ID、质量、发布、回滚状态；取消和回滚只能登记 Outbox 动作，不在浏览器直接操作数据库。若目标 Profile 包含多张表，运行中心应显示中文编译错误和具体原因，不应创建 SeaTunnel 作业。
 7. 进入“Benchmark”，使用固定参数运行 L0 和 L1。L0 的拒绝率应为 `0`，L1 应出现质量拒绝且 P0 拦截率为 `1.0`。
 
 ## 6. API 冒烟测试
@@ -166,7 +166,7 @@ M5.5 已使用 VM 上的合成 MySQL、SeaTunnel 2.3.10 和 Doris 单机实例�
 1. 确认 MySQL/Doris/SeaTunnel/Vault 容器健康，且 `secret/etl-agent/mysql`、`secret/etl-agent/doris` 存在。
 2. 运行 `scripts/seed_synthetic_mysql.py --rows 10000 --batch-size 1000`，登记 VM MySQL `192.168.181.128:3306` 和 Doris `192.168.181.128:9030` 连接。
 3. 分别执行连接测试和 Profile 探查，源表选 `demo_orders`，目标表选 `orders_current`。
-4. 运行百炼生成，完成 Prepare、Checker 审批和 Operator Commit。
+4. 运行百炼生成，完成 Prepare、Checker 审批和 Operator Commit。若需求包含当前未实现的增量、CDC、脱敏、Join 或聚合，生成阶段应直接显示“不支持的数据面能力”，不能冻结版本或进入 Prepare。
 5. 在运行中心等待 `succeeded/published`，确认输入/输出各 10,000、拒绝数为 0。
 6. 对终态执行发起 Rollback，确认 `rollback=completed`、`publish=cleaned`，再查询 Doris 正式表仍有 10,000 行。
 
@@ -178,6 +178,7 @@ M5.5 已使用 VM 上的合成 MySQL、SeaTunnel 2.3.10 和 Doris 单机实例�
 - Maker 自审批：应显示“制作人不能审批自己的申请”，HTTP 状态为 `403`。
 - 版本未通过生成门禁直接 Prepare：应显示“版本尚未通过生成门禁”，HTTP 状态为 `409`。
 - L1 Benchmark：应出现拒绝记录，且 P0 拦截率保持 `1.0`。
+- 未实现数据面能力：输入“按更新时间增量同步并脱敏 email”，完成增量字段澄清后应返回 `validation_failed` 和 `UNSUPPORTED_DATA_PLANE_FEATURE`；Provider 只调用候选生成，不应进入 `RepairNode`。
 
 ## 9. 测试证据
 

@@ -49,6 +49,28 @@ async def test_seatunnel_adapter_submit_status_and_cancel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_seatunnel_adapter_exposes_sanitized_submit_error_detail() -> None:
+    """验证提交失败保留上游摘要和状态码，同时不暴露连接凭据。"""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            json={"message": "SQL failed: password=plain-secret near BIGINT"},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = SeaTunnelAdapter("http://zeta", client=client)
+    try:
+        with pytest.raises(EngineError) as error:
+            await adapter.submit({"hocon": "env { parallelism = 1 }"})
+    finally:
+        await client.aclose()
+    assert "SeaTunnel HTTP 500" in str(error.value)
+    assert "near BIGINT" in str(error.value)
+    assert "plain-secret" not in str(error.value)
+
+
+@pytest.mark.asyncio
 async def test_seatunnel_adapter_maps_native_job_status_and_metrics() -> None:
     """验证 SeaTunnel 2.3.10 的 jobStatus 和原生指标会转换为控制面字段。"""
 

@@ -13,6 +13,8 @@ ETL-Agent 是企业数据集成控制面：自然语言需求经过 LangGraph �
 - 仓库已完成 M1.2 控制面基础、M2.3 连接/Profile/文件资产基础、M3.2 Agent 生成边界、M4.4 Harness Commit、M5.5 真实合成数据面闭环、M6/M6.1 前端/Benchmark 与历史摘要持久化；Python 3.12 + uv 依赖和 `uv.lock` 已准备，已建立 `src/`、`tests/`、`migrations/`、CI、`/health`、JWT/项目成员 API、Vault SecretProvider、MySQL/Doris 连接测试、数据库/文件 Profile、MinIO 文件资产 API、EtlPlan/HOCON 门禁、LangGraph 生成、澄清恢复、Prompt 上限、不可变 PipelineVersion、PDP 风险决策、Preparation、独立审批 API、Ed25519 验签、Redis Replay Guard、Commit/ExecutionRun、Transactional Outbox、Evidence Ledger、Celery Tool Broker、SeaTunnel Adapter、质量契约/预算监督、取消/清理/Swap/回滚 API、合成 MySQL 数据脚本、项目级控制台查询、Benchmark 持久化查询和 Vue 控制台。SeaTunnel 2.3.10 已在 VM 打通合成 MySQL → Doris 影子表 → 原子 Swap/Rollback；生产业务库、生产级压测、实时推送、前端生产容器和企业 SSO 仍是后续扩展。
 - Windows/PyCharm 是后续控制面开发环境；截至 2026-08-25，Ubuntu VM `192.168.181.128` 已由 Compose 启动 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel，核心基础设施均处于运行状态；SeaTunnel 使用不传 `-r` 的单节点默认 `MASTER_AND_WORKER` 角色。VM 端口已对开发机开放，Windows 到 PostgreSQL、Redis、MinIO、Vault 和 SeaTunnel 的 TCP/协议级检查均通过。
 - LLM 只调用远端百炼，不在本地或 VM 部署模型。
+- M6.2 体验与可观测性优化已落地：异步 AgentRun/Celery 生成、逐 LangGraph 节点持久化、澄清答案异步恢复、连接预设/Profile 表名建议、Pipeline/版本业务标签、Prepare Checker 要求和 Worker 结构化事件日志；当前继续支持 AgentRun 候选结果审查对话和 EtlPlan/HOCON 展示，迁移为 `0012_agent_run_progress`、`0013_agent_run_chat`。控制台仍需重启 FastAPI、Worker 和 Beat 后使用新接口。
+- Windows Worker 兼容性：Celery 异步任务入口统一使用 Selector 事件循环，避免 psycopg Checkpoint 在默认 Proactor 下于首节点前失败；修改 Worker 代码后必须重启 Worker/Beat。
 - 详细学习、Agent 约定和源码阅读入口见 [项目学习资料](项目学习资料_ProjectLearning/AGENTS.md)。
 
 ## 3. 必读导航
@@ -22,6 +24,7 @@ ETL-Agent 是企业数据集成控制面：自然语言需求经过 LangGraph �
 - 架构和模型：[系统架构](docs/architecture/系统设计架构_SystemArchitecture.md)、[系统详细设计](docs/architecture/系统详细设计_SystemDetailedDesign.md)、[数据模型](docs/data/数据模型与数据库设计_DataModel.md)。
 - 实现和运行：[开发手册](docs/development/首期开发手册_DevelopmentHandbook.md)、[API 契约](docs/api/API契约基线_APIContract.md)、[VM 部署](docs/operations/Ubuntu虚拟机部署_LocalVMDeployment.md)。
 - 实际使用和演示：[项目使用手册](docs/development/项目使用手册_ProjectUserGuide.md)、[项目测试手册](docs/development/项目测试手册_ProjectTestingGuide.md)。
+- 真实验收证据：[需求 A-F 真实验收记录](docs/development/需求A-F真实验收记录_RealAcceptanceReport.md)。
 - 质量和安全：[测试策略](docs/quality/测试与质量策略_TestStrategy.md)、[安全设计](docs/security/安全设计与威胁模型_SecurityDesign.md)、[需求追踪](docs/traceability/需求追踪矩阵_RequirementsTraceability.md)。
 
 ## 4. 不可绕过的工程规则
